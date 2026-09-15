@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>墨水屏控制台</title>
+<style>
+:root {
+  --bg:#f5f6f8; --card:#fff; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+  --accent:#2563eb; --accent-soft:#eef2ff; --ok:#059669; --ok-soft:#ecfdf5;
+  --warn:#92400e; --warn-soft:#fef3c7; --bad:#dc2626; --bad-soft:#fef2f2;
+}
+* { box-sizing:border-box; }
+body { margin:0; font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); }
+.wrap { max-width:680px; margin:0 auto; padding:20px 16px 32px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+h1 { font-size:20px; margin:0; }
+#status { padding:4px 12px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:13px; white-space:nowrap; }
+#status.busy { background:var(--warn-soft); color:var(--warn); }
+#status.ok { background:var(--ok-soft); color:var(--ok); }
+#status.bad { background:var(--bad-soft); color:var(--bad); }
+.sub { color:var(--muted); font-size:12px; margin-top:6px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:14px; box-shadow:0 1px 2px rgba(0,0,0,.03); }
+.sec-title { font-size:13px; font-weight:600; color:var(--muted); margin:0 0 10px; letter-spacing:.05em; }
+.pages { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
+.page-btn { display:flex; flex-direction:column; align-items:center; gap:4px; padding:12px 4px 10px; border:1px solid var(--line); border-radius:12px; background:#fafbfc; color:var(--ink); font-size:12px; cursor:pointer; transition:border-color .15s, background .15s; }
+.page-btn .ico { font-size:20px; }
+.page-btn:hover { border-color:var(--accent); }
+.page-btn.active { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600; }
+button { border:none; border-radius:10px; padding:11px 12px; font-size:14px; cursor:pointer; background:var(--accent); color:#fff; font-family:inherit; }
+button:hover { filter:brightness(1.06); }
+button.ghost { background:var(--accent-soft); color:var(--accent); }
+button.warn { background:var(--warn-soft); color:var(--warn); }
+button:disabled { opacity:.5; cursor:not-allowed; filter:none; }
+.row { display:flex; flex-wrap:wrap; gap:8px; }
+.row > button { flex:1 1 auto; }
+.full { width:100%; margin-top:8px; }
+.hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.5; }
+label { font-size:13px; color:var(--muted); }
+select, #planInputs input { padding:9px; border:1px solid var(--line); border-radius:8px; font-size:14px; background:#fff; color:var(--ink); }
+#planInputs { margin-top:10px; display:grid; gap:8px; }
+#planInputs .item { display:flex; align-items:center; gap:8px; }
+#planInputs .item span { min-width:44px; font-size:13px; color:var(--muted); }
+#planInputs input { flex:1; min-width:0; }
+#preview { display:none; width:100%; border:1px solid var(--line); border-radius:10px; margin-top:10px; }
+#page4Report { display:none; margin-top:12px; padding:12px; border:1px solid var(--line); border-radius:10px; background:#fafbfc; color:var(--ink); font-size:13px; line-height:1.7; white-space:pre-wrap; max-height:420px; overflow-y:auto; }
+#page4Meta { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+#page4Meta span { padding:3px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:11px; }
+#page4Meta span.bad { background:var(--warn-soft); color:var(--warn); }
+#page4Recent { color:var(--muted); font-size:12px; line-height:1.6; }
+details { margin-top:10px; }
+summary { font-size:13px; color:var(--muted); cursor:pointer; }
+#log { background:#0f172a; color:#cbd5e1; font-family:Consolas,Menlo,monospace; font-size:12px; padding:10px; border-radius:10px; height:180px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+footer { margin-top:16px; text-align:center; }
+@media (max-width:480px){ .pages { grid-template-columns:repeat(3,1fr); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>墨水屏控制台</h1>
+    <span id="status">加载中…</span>
+  </header>
+  <div class="sub">全局热键：<span id="hotkeyStatus">读取中…</span></div>
+
+  <div class="card">
+    <div class="sec-title">页面</div>
+    <div class="pages">
+      <button class="page-btn" data-page="1" onclick="run('page1')"><span class="ico">📅</span>今日</button>
+      <button class="page-btn" data-page="2" onclick="run('page2')"><span class="ico">📰</span>新闻</button>
+      <button class="page-btn" data-page="3" onclick="run('page3')"><span class="ico">📈</span>行情</button>
+      <button class="page-btn" data-page="4" onclick="run('page4')"><span class="ico">🧠</span>洞察</button>
+      <button class="page-btn" data-page="5" onclick="run('page5')"><span class="ico">📊</span>智谱AI</button>
+    </div>
+    <button class="ghost full" onclick="run('page' + curPage, true)">⚡ 强制联网刷新当前页</button>
+    <div class="hint">切页优先用缓存秒出（行情盘中 3 分钟 / 新闻 10 分钟 / 天气 30 分钟内视为新鲜）；快捷键 M1–M5、F13–F17 或 Ctrl+Alt+1–5（需本页面获得焦点）。</div>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">数据与 AI 报告</div>
+    <div class="row">
+      <button onclick="run('refresh')">完整刷新</button>
+      <button class="ghost" onclick="run('analysis')">重新生成认知洞察</button>
+      <button class="ghost" onclick="run('stock')">重新生成智谱AI分析</button>
+    </div>
+    <div class="hint">完整刷新 = 抓取全部数据并轮播到下一页；AI 报告重新生成约需 1–3 分钟。</div>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">页4 · 认知洞察</div>
+    <div id="page4Topic" class="hint" style="margin:0">读取中…</div>
+    <div id="page4Meta"></div>
+    <div id="page4Recent"></div>
+    <div class="row">
+      <button class="ghost" onclick="run('preview_page4')">仅预览页4</button>
+      <button onclick="run('page4')">切到页4</button>
+      <button class="ghost" onclick="run('analysis')">重新生成并推送</button>
+    </div>
+    <div class="hint">切页、预览、热键、Web 或轮播触发页4时都会按领域轮换生成新主题；系统保留 120 个历史主题去重，重复主题会自动重试。生成失败时取消推送，避免重复显示。</div>
+    <pre id="page4Report"></pre>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">修改计划（最多 5 条）</div>
+    <div class="row" style="align-items:center">
+      <label>数量</label>
+      <select id="planCount" onchange="showPlanInputs()">
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+      </select>
+      <button onclick="submitPlans()" style="margin-left:auto">提交并推送</button>
+    </div>
+    <div id="planInputs"></div>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">维护</div>
+    <div class="row">
+      <button class="ghost" onclick="run('preview')">渲染预览</button>
+      <button class="warn" onclick="run('clear')">清屏</button>
+    </div>
+    <details>
+      <summary>测试图案</summary>
+      <div class="row" style="margin-top:8px">
+        <button class="ghost" onclick="run('test_info')">信息卡</button>
+        <button class="ghost" onclick="run('test_chess')">棋盘格</button>
+        <button class="ghost" onclick="run('test_black')">全黑</button>
+      </div>
+    </details>
+    <img id="preview" alt="预览图">
+  </div>
+
+  <div class="card">
+    <div class="sec-title">运行日志</div>
+    <div id="log"></div>
+  </div>
+
+  <footer class="sub">仅限同一局域网访问 · 端口 {{PORT}}</footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

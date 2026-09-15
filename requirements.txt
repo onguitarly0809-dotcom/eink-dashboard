@@ -1,0 +1,4 @@
+Pillow
+pyserial
+lunar-python
+akshare
