@@ -120,10 +120,10 @@ def _build_messages(previous, now, domain, rejected_topics=()):
         f"{INSIGHT_MAX_CHARS}字以内，六个小节标题独占一行并用【】包裹，配额如下：\n"
         "-【主题名称】不超过18字：只写中文名，不括注英文名；\n"
         f"-【所属领域】只写“{domain}”原文，不添加说明；\n"
-        "-【核心知识】不超过100字：给出这条知识的核心内容；\n"
-        "-【背后的机制】不超过180字：把机制讲成自然的因果链，并说明边界条件；\n"
-        "-【生活里的样子】不超过130字：一个具体、贴近日常的完整场景；\n"
-        "-【怎么用起来】不超过70字：给出可操作的识别或调整方法。\n"
+        "-【核心知识】不超过120字：给出这条知识的核心内容；\n"
+        "-【背后的机制】不超过220字：把机制讲成自然的因果链，并说明边界条件；\n"
+        "-【生活里的样子】不超过160字：一个具体、贴近日常的完整场景；\n"
+        "-【怎么用起来】不超过90字：给出可操作的识别或调整方法。\n"
         "要求：\n"
         "1. 每节标题后另起一行写正文，内容连贯，不要markdown符号、表情、网址或参考文献；\n"
         "2. 语气口语化但不说教：像给聪明的朋友解释，不像上课，也不是在写文案；"
@@ -141,6 +141,7 @@ def _build_messages(previous, now, domain, rejected_topics=()):
 
 def _normalize_text(text):
     lines = []
+    leading_lines = []
     started = False
     for raw in text.splitlines():
         line = raw.strip().lstrip("-*#").strip()
@@ -149,6 +150,13 @@ def _normalize_text(text):
         matched = False
         for section in REQUIRED_SECTIONS:
             if section in line:
+                if (
+                    not started
+                    and section == REQUIRED_SECTIONS[1]
+                    and len(leading_lines) == 1
+                ):
+                    lines.append(REQUIRED_SECTIONS[0])
+                    lines.append(leading_lines[0])
                 started = True
                 _before, after = line.split(section, 1)
                 lines.append(section)
@@ -157,6 +165,7 @@ def _normalize_text(text):
                 matched = True
                 break
         if not started:
+            leading_lines.append(line)
             continue
         if not matched:
             lines.append(line)
@@ -185,7 +194,7 @@ def _extract_topic(text):
     if not body:
         return ""
     topic = re.sub(r"[（(][^（）()]*[)）]", "", body[0])
-    return topic.strip().strip("“”\"'")
+    return topic.strip().strip("“”\"'【】")
 
 
 def _response_error(text, expected_domain):

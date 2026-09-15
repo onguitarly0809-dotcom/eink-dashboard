@@ -116,7 +116,7 @@ ANALYSIS_NEWS_BUDGET = 30.0    # 板块新闻标题抓取整体时间预算（�
 # ---------- 页4认知洞察解读 ----------
 # 生成端保留六段结构；渲染端剥离主题/领域两个元信息小节，
 # 正文按22/20/18/16/14/12px自适应，优先把释放出的空间用于放大内容。
-INSIGHT_MAX_CHARS = 520
+INSIGHT_MAX_CHARS = 600
 INSIGHT_RECENT_TOPICS = 8      # Web 控制台展示的最近主题数
 INSIGHT_TOPIC_HISTORY = 120   # 持久去重历史，避免重复讲解同一主题
 INSIGHT_RETRY_COUNT = 3       # 主题重复或格式异常时的重试次数

@@ -18,7 +18,7 @@ HEADER_SPACE_MAX = 20
 HEADER_UNDERLINE_GAP = 6  # 小节标题下通栏细线占用的额外高度（_measure 必须计入，否则误判溢出截断）
 HEADER_INDENT = 13    # 小节标题因左侧竖线强调而右缩进的宽度
 BODY_SIZES = (16, 15, 14, 12)  # 自适应字号候选：从大到小取第一个放得下的（16px 为目标字号，15 为长报告过渡档）
-INSIGHT_BODY_SIZES = (22, 20, 18, 16, 14, 12)  # 页4专用：删去两个元信息小节后，优先放大真正内容
+INSIGHT_BODY_SIZES = (16, 15, 14, 12)  # 页4专用：缩小字号以容纳更长内容
 STOCK_BODY_SIZES = (18, 16, 15, 14, 12)  # 页5专用：取消风险提示后优先放大正文
 SUMMARY_SIZE = 16     # 页首速览行字号
 CHART_HEIGHT = 132    # 页5 分时折线面板总高（含价格叠加行与底部时间刻度）
@@ -68,15 +68,28 @@ def _select_body_size(draw, segments, content_width, height_budget, body_sizes=B
 def _strip_insight_metadata(text):
     """页4正文不再重复主题/领域两个元信息小节，直接从核心知识开始。"""
     metadata_sections = {"【主题名称】", "【所属领域】"}
+    content_sections = {
+        "【核心知识】",
+        "【背后的机制】",
+        "【生活里的样子】",
+        "【怎么用起来】",
+    }
     output = []
     skipping = False
     for raw in text.splitlines():
         line = raw.strip()
-        if line in metadata_sections:
+        metadata_marker = next((section for section in metadata_sections if section in line), None)
+        content_marker = next((section for section in content_sections if section in line), None)
+        if metadata_marker:
             skipping = True
             continue
-        if line.startswith("【") and line.endswith("】"):
+        if content_marker:
             skipping = False
+            remainder = line.replace(content_marker, "", 1).strip()
+            output.append(content_marker)
+            if remainder:
+                output.append(remainder)
+            continue
         if line and not skipping:
             output.append(line)
     return "\n".join(output)
@@ -309,7 +322,7 @@ def _pct_text(pct):
 def render_page4(analysis):
     """页4：多领域认知洞察紧凑版式。"""
     a = analysis or {}
-    topic = a.get("topic") or "待生成"
+    topic = (a.get("topic") or "待生成").strip().strip("【】")
     domain = a.get("domain") or "轮换生成"
     notes = (
         "暂无分析报告。",
