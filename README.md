@@ -39,6 +39,7 @@ dashboard_serial/
 ├── render_dashboard.py
 ├── send_dashboard.ps1
 ├── setup_web_autostart.ps1
+├── epd_refresh_hidden.vbs
 ├── dashboard_serial.ino
 └── EPDSerial.h
 ```
@@ -87,6 +88,22 @@ http://127.0.0.1:8080
 cd .\dashboard_serial
 .\dashboard_control.ps1 refresh
 ```
+
+### 5. 定时自动刷新（可选）
+
+用 Windows 计划任务在工作时段每 20 分钟轮播刷新。启动动作请经由 `epd_refresh_hidden.vbs`：
+它以 SW_HIDE 在进程创建时就隐藏控制台；若直接跑 `powershell.exe -WindowStyle Hidden`，窗口是
+先创建再隐藏，每个刷新周期都会闪一次黑框打断操作。
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "wscript.exe" `
+  -Argument ('"' + "$PWD\dashboard_serial\epd_refresh_hidden.vbs" + '"')
+$trigger = New-ScheduledTaskTrigger -Once -At "08:30" `
+  -RepetitionInterval (New-TimeSpan -Minutes 20) -RepetitionDuration (New-TimeSpan -Hours 10.5)
+Register-ScheduledTask -TaskName "EPD_Dashboard_Refresh" -Action $action -Trigger $trigger
+```
+
+刷新时段可按需调整（例如跳过午休，可拆成两段触发器）。
 
 ## 配置说明
 
