@@ -1,7 +1,8 @@
-"""页1（今日看板）：日期天气面板、Agent Plan + GLM 双栏额度面板、工作计划面板。"""
+"""页1（今日看板）：日期天气面板、GLM Coding Plan 圆环额度面板、工作计划面板。"""
+
 from epd_dashboard.calendar_cn import lunar_extra
 from epd_dashboard.config import PANEL_HEIGHT, PANEL_WIDTH, PANEL_X, PANEL_Y, WIDTH, HEIGHT
-from epd_dashboard.fonts import FONT_REGULAR, FONT_STRONG, SIZE_L, SIZE_M, SIZE_S, SIZE_XS, font
+from epd_dashboard.fonts import FONT_REGULAR, FONT_STRONG, SIZE_L, SIZE_M, SIZE_S, font
 from epd_dashboard.placeholders import placeholder_glm
 from epd_dashboard.renderers.common import draw_panel
 from PIL import Image, ImageDraw
@@ -68,77 +69,51 @@ def render_weather(draw, panel_y, weather, now):
             draw.line((x, reset_y + 6, x, p0 + PANEL_HEIGHT - 13), fill=0, width=2)
 
 
-def _quota_half(draw, x0, x1, panel_y, subtitle, sub_right, items):
-    """半区小栏：栏标题+下划线，下方若干“标签/剩余% + 进度条”行按行数自适应分布。"""
-    header_font = font(SIZE_M, FONT_STRONG)
-    draw.text((x0, panel_y + 16), subtitle, font=header_font, fill=0)
-    if sub_right:
-        tag_font = font(SIZE_XS)
-        header_w = draw.textlength(subtitle, font=header_font)
-        tag_w = draw.textlength(sub_right, font=tag_font)
-        if header_w + tag_w + 10 <= x1 - x0:  # 放不下就舍弃档位标签，避免与栏标题重叠
-            draw.text((x1, panel_y + 25), sub_right, font=tag_font, fill=0, anchor="ra")
-    rule_y = panel_y + 48
-    draw.line((x0, rule_y, x1, rule_y), fill=0, width=2)
-    rows_top = panel_y + 58
-    rows_bottom = panel_y + PANEL_HEIGHT - 68  # 重置区上划线（-60）再留 8px 间距
-    n = len(items)
-    group_h = (rows_bottom - rows_top) / n
-    bar_h = 12 if n <= 2 else 11
-    offset = 4 if n <= 2 else 2
-    for index, (title, quota) in enumerate(items):
-        group_top = rows_top + index * group_h
-        draw.text((x0, group_top + offset), title, font=font(SIZE_S, FONT_STRONG), fill=0)
-        draw.text((x1, group_top + offset), f'{quota["percent"]}%', font=font(SIZE_M, FONT_STRONG), fill=0, anchor="ra")
-        bar_y = int(group_top + offset + 24)
-        draw.rectangle((x0, bar_y, x1, bar_y + bar_h), outline=0, width=2)
-        fill_w = int((x1 - x0) * quota["percent"] / 100)
-        draw.rectangle((x0 + 2, bar_y + 2, x0 + 2 + max(0, fill_w - 4), bar_y + bar_h - 2), fill=0)
-
-
-def _reset_strip(draw, x0, x1, reset_y, panel_bottom, items):
-    """底部重置时间条：等分列，label 上、时间下。"""
-    n = len(items)
-    col_w = (x1 - x0) / n
-    for index, (label, value) in enumerate(items):
-        x = x0 + index * col_w
-        center = x + col_w / 2
-        draw.text((center, reset_y + 6), label, font=font(SIZE_S), fill=0, anchor="ma")
-        draw.text((center, reset_y + 27), value, font=font(SIZE_S), fill=0, anchor="ma")
-        if index:
-            draw.line((x, reset_y + 6, x, panel_bottom), fill=0, width=2)
+def _quota_bar(draw, x0, x1, y, percent, segments=20, height=13, gap=3):
+    """分段电量条：黑色外框包住20格区域，框线与色块之间四周留2px空白，
+    色块完整可见、不与边框粘连。点亮格数=剩余比例，未点亮的空格留在框内，
+    93%时一眼能看出与满格的差距。"""
+    inner_x0, inner_x1 = x0 + 4, x1 - 4  # 左右框线2px+空白2px
+    pitch = (inner_x1 - inner_x0) / segments
+    seg_w = pitch - gap
+    lit = round(max(0, min(100, percent)) / 100 * segments)
+    for index in range(lit):
+        sx0 = inner_x0 + index * pitch
+        draw.rectangle((sx0, y, sx0 + seg_w, y + height), fill=0)
+    draw.rectangle((x0, y - 4, x1, y + height + 4), outline=0, width=2)
 
 
 def render_agentplan(draw, panel_y, quotas, glm):
-    # Plan 额度：取消总标题行，整块左右一分为二，左=火山方舟 Agent Plan（5h/周/月），右=GLM Coding Plan（5h/每周，无月额度）
+    # Plan 额度：火山方舟已退订不再显示，GLM Coding Plan 单独成板。每个窗口一行：
+    # 窗口名+同字号剩余%（20px，刻意低于日期52px/温度32px，页面视觉重心仍归日期）
+    # + 带外框的分段电量条 + 重置时间。quotas 参数保留只是兼容调用链。
     if not (glm and glm.get("quotas")):
         glm = placeholder_glm()
     p1 = panel_y
-    draw.rectangle((PANEL_X, p1, PANEL_X + PANEL_WIDTH, p1 + PANEL_HEIGHT), outline=0, width=3)
-    mid_x = PANEL_X + PANEL_WIDTH // 2
-    left_x, left_end = PANEL_X + 16, mid_x - 12
-    right_x, right_end = mid_x + 12, PANEL_X + PANEL_WIDTH - 16
-    reset_y = p1 + PANEL_HEIGHT - 60  # 重置区上划线
-    panel_bottom = p1 + PANEL_HEIGHT - 13
-    draw.line((mid_x, p1 + 3, mid_x, p1 + PANEL_HEIGHT - 3), fill=0, width=2)
-
     glm_level = glm.get("level") or ""
-    _quota_half(draw, left_x, left_end, p1, "火山方舟 Agent Plan", "", list(quotas.items()))
-    _quota_half(
-        draw, right_x, right_end, p1,
-        "GLM Coding Plan", f"{glm_level}档" if glm_level else "", list(glm["quotas"].items()),
-    )
+    draw_panel(draw, p1, "GLM Coding Plan", f"{glm_level}档" if glm_level else "",
+               right_size=SIZE_S, title_weight=700)
 
-    draw.line((PANEL_X + 16, reset_y, PANEL_X + PANEL_WIDTH - 16, reset_y), fill=0, width=2)
-    reset_labels = {"5小时": "5h重置", "周额度": "周重置", "月额度": "月重置"}
-    left_resets = [
-        (reset_labels.get(title, f"{title[:2]}重置"), quota["reset"]) for title, quota in quotas.items()
-    ]
-    right_resets = [
-        (reset_labels.get(title, f"{title[:2]}重置"), quota["reset"]) for title, quota in glm["quotas"].items()
-    ]
-    _reset_strip(draw, left_x, left_end, reset_y, panel_bottom, left_resets)
-    _reset_strip(draw, right_x, right_end, reset_y, panel_bottom, right_resets)
+    items = list(glm["quotas"].items())
+    titles = {"5小时": "5小时额度", "周额度": "每周额度"}
+    n = max(1, len(items))
+    content_top = p1 + 66
+    content_bottom = p1 + PANEL_HEIGHT - 18
+    row_h = (content_bottom - content_top) / n
+    right_x = PANEL_X + PANEL_WIDTH - 16
+    for index, (title, quota) in enumerate(items):
+        row_cy = content_top + row_h * (index + 0.5)
+        if index:
+            draw.line((PANEL_X + 16, row_cy - row_h / 2, PANEL_X + PANEL_WIDTH - 16, row_cy - row_h / 2),
+                      fill=0, width=2)
+        draw.text((PANEL_X + 16, row_cy - 16), titles.get(title, title),
+                  font=font(20), fill=0, anchor="ls")
+        draw.text((right_x, row_cy - 16), f'{quota["percent"]}%',
+                  font=font(20), fill=0, anchor="rs")
+        _quota_bar(draw, PANEL_X + 16, right_x, row_cy - 4, quota["percent"])
+        reset = quota["reset"]
+        reset_text = reset if any(word in reset for word in ("失败", "权限")) else f"重置 {reset}"
+        draw.text((PANEL_X + 16, row_cy + 21), reset_text, font=font(SIZE_S), fill=0, anchor="la")
 
 
 def render_plans(draw, panel_y, plans, now):
