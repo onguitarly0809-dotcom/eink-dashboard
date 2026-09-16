@@ -5,13 +5,15 @@ from datetime import datetime, timedelta
 
 from epd_dashboard.config import DATA_CACHE_FILE
 
-EMPTY_CACHE = {"weather": None, "quotas": None, "glm": None, "plans": None, "news": None, "markets": None}
+EMPTY_CACHE = {"weather": None, "glm": None, "plans": None, "news": None, "markets": None}
 
 
 def load_cache():
     if DATA_CACHE_FILE.exists():
         try:
-            return json.loads(DATA_CACHE_FILE.read_text(encoding="utf-8"))
+            cache = json.loads(DATA_CACHE_FILE.read_text(encoding="utf-8"))
+            cache.pop("quotas", None)  # 火山方舟已退订，丢弃历史缓存中的残留键
+            return cache
         except Exception:
             pass
     return dict(EMPTY_CACHE)

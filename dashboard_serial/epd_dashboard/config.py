@@ -89,8 +89,6 @@ MARKET_GROUPS = {
 MARKET_COMPANY_SYMBOLS = (("hk02513", "智谱AI"),)
 
 # ---------- 跨模块共享的文件路径 ----------
-AGENT_PLAN_DATA_FILE = BASE_DIR / "agent_plan_data.js"
-AGENT_PLAN_ENABLED = os.getenv("EPD_AGENT_PLAN_ENABLED", "") == "1"
 GLM_USAGE_CONF = Path(os.getenv("GLM_USAGE_CONF", BASE_DIR / "glm_usage.conf"))
 GLM_QUOTA_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit?type=2"
 
@@ -141,7 +139,6 @@ DEFAULT_OUTPUT_DIR = BASE_DIR
 # 命令不受 TTL 限制，仍全量抓取。markets 分交易时段：盘中行情变化快用短 TTL，收盘后用长 TTL。
 TTL_MINUTES = {
     "weather": 30,
-    "quotas": 60,
     "glm": 30,
     "news": 10,
 }

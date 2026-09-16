@@ -2,7 +2,7 @@
 # 用法:
 #   .\dashboard_control.ps1 refresh                          # 更新全部(天气+额度+计划)并推送
 #   .\dashboard_control.ps1 weather                          # 只更新天气并推送
-#   .\dashboard_control.ps1 agentplan                        # 只更新 Agent Plan 并推送
+#   .\dashboard_control.ps1 weather                          # 只更新天气并推送
 #   .\dashboard_control.ps1 plans                            # 只更新计划并推送
 #   .\dashboard_control.ps1 plans -PlansText "事项A; 事项B"   # 先写计划再推送
 #   .\dashboard_control.ps1 test -Pattern info               # 测试卡(默认 info)
@@ -15,19 +15,19 @@
 #   .\dashboard_control.ps1 analysis                         # 强制重新生成AI认知洞察并推送到页4
 #   .\dashboard_control.ps1 page5                            # 渲染页5(智谱AI走势归因)并推送(超TTL且港股时段内自动重生成)
 #   .\dashboard_control.ps1 stock                            # 强制重新生成智谱AI走势归因并推送到页5
-#   单模块更新会先跳转到该模块所在页再渲染推送：weather/agentplan/plans→页1(今日看板)、news→页2(三栏新闻)、markets→页3(行情)、analysis→页4(认知洞察)、stock→页5(智谱AI走势归因)
+#   单模块更新会先跳转到该模块所在页再渲染推送：weather/plans→页1(今日看板)、news→页2(三栏新闻)、markets→页3(行情)、analysis→页4(认知洞察)、stock→页5(智谱AI走势归因)
 #   refresh 每次调用自动轮播 页1(今日看板) / 页2(三栏新闻) / 页3(行情) / 页4(认知洞察) / 页5(智谱AI走势归因)
 #   .\dashboard_control.ps1 clear                            # 清屏(全白)
 #   .\dashboard_control.ps1 preview                          # 只渲染不推送(先看效果)
 #   .\dashboard_control.ps1 status                           # 查看各模块状态
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("test", "weather", "agentplan", "plans", "news", "markets", "analysis", "stock", "refresh", "preview", "status", "clear", "page1", "page2", "page3", "page4", "page5")]
+    [ValidateSet("test", "weather", "plans", "news", "markets", "analysis", "stock", "refresh", "preview", "status", "clear", "page1", "page2", "page3", "page4", "page5")]
     [string]$Command = "refresh",
     [string]$PortName = $env:EPD_SERIAL_PORT,
     [ValidateSet("info", "chess", "white", "black")]
     [string]$Pattern = "info",
-    [ValidateSet("full", "today", "weather", "agentplan", "plans", "news", "markets", "insight", "psychology", "analysis", "stock")]
+    [ValidateSet("full", "today", "weather", "plans", "news", "markets", "insight", "psychology", "analysis", "stock")]
     [string]$RenderMode = "full",
     [ValidateRange(0, 5)]
     [int]$Page = 0,
@@ -50,9 +50,6 @@ $PlansFile = Join-Path $ScriptDir "plans.txt"
 $CacheFile = Join-Path $ScriptDir "dashboard_data.json"
 $PageStateFile = Join-Path $ScriptDir "page_state.json"
 $LogFile = Join-Path $ScriptDir "control.log"
-# Agent Plan 为可选集成；显式设置 EPD_AGENT_PLAN_ENABLED=1 后才会调用本机工具或缓存。
-$DataJsFile = Join-Path $ScriptDir "agent_plan_data.js"
-$MaxDataJsAgeMinutes = 30
 # 跨进程互斥：计划任务 / Web 控制台 / 热键 / 手动 CLI 四个入口共用同一把锁，
 # 防止并发渲染互相覆盖 dashboard_data.json 或同时抢占串口
 $MutexName = "Global\EPD_Dashboard_Control"
@@ -78,25 +75,6 @@ function Write-Log([string]$msg) {
             $lines | Select-Object -Last ([int]($lines.Count / 2)) | Set-Content -LiteralPath $LogFile -Encoding UTF8
         }
     } catch { }
-}
-
-function Ensure-DataJsFresh {
-    if (-not (Test-Path -LiteralPath $DataJsFile)) {
-        Write-Host "data.js 不存在；将优先直连 arkcli 获取 Agent Plan。"
-        return
-    }
-    $raw = [System.IO.File]::ReadAllText($DataJsFile, [System.Text.Encoding]::UTF8)
-    if ($raw -match '"fetched_at":\s*"([^"]+)"') {
-        $fetched = [datetime]::Parse($Matches[1], $InvariantCulture)
-        $ageMin = (New-TimeSpan -Start $fetched -End (Get-Date)).TotalMinutes
-        if ($ageMin -gt $MaxDataJsAgeMinutes) {
-            Write-Host "data.js 已过期（$([math]::Round($ageMin, 1)) 分钟）；将优先直连 arkcli，登录态失效时自动弹出登录窗口。"
-        } else {
-            Write-Host "data.js 新鲜（$([math]::Round($ageMin, 1)) 分钟前更新）"
-        }
-    } else {
-        Write-Host "data.js 无法解析 fetched_at；将优先直连 arkcli 获取 Agent Plan。"
-    }
 }
 
 function Get-PageState {
@@ -202,11 +180,6 @@ try {
             Invoke-RenderAndCommitPage "weather" -TargetPage 1
             Write-Log "weather(page=1) -> pushed"
         }
-        "agentplan" {
-            Ensure-DataJsFresh
-            Invoke-RenderAndCommitPage "agentplan" -TargetPage 1
-            Write-Log "agentplan(page=1) -> pushed"
-        }
         "plans" {
             if ($PlansText) {
                 $items = @($PlansText -split ";" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -218,7 +191,6 @@ try {
             Write-Log "plans(page=1) -> pushed"
         }
         "page1" {
-            Ensure-DataJsFresh
             # 页1 渲染器只用天气/额度/计划，news/markets 交给页2/页3 与定时轮播刷新；
             # today 模式受 TTL 门控，缓存新鲜时秒出图
             Invoke-RenderAndCommitPage "today" -TargetPage 1 -Force:$Force
@@ -259,7 +231,6 @@ try {
             Write-Log "markets(page=3) -> pushed"
         }
         "refresh" {
-            Ensure-DataJsFresh
             $target = ((Get-PageState) % 5) + 1
             Invoke-RenderAndCommitPage "full" -TargetPage $target
             Write-Log "refresh(full page=$target) -> pushed"
@@ -298,14 +269,12 @@ try {
                 if ($cache.weather) {
                     Write-Host ("天气: {0}°C {1}，湿度 {2}%，更新 {3}" -f $cache.weather.temperature, $cache.weather.description, $cache.weather.humidity, $cache.weather.updated)
                 } else { Write-Host "天气: 无缓存" }
-                if ($cache.quotas) {
-                    foreach ($k in @("5小时", "周额度", "月额度")) {
-                        if ($cache.quotas.$k) {
-                            $q = $cache.quotas.$k
-                            Write-Host ("{0}: 剩 {1:N0}/{2:N0}（{3}%），重置 {4}" -f $k, $q.remaining, $q.total, $q.percent, $q.reset)
-                        }
+                if ($cache.glm) {
+                    foreach ($k in $cache.glm.quotas.PSObject.Properties.Name) {
+                        $q = $cache.glm.quotas.$k
+                        Write-Host ("GLM {0}: 剩 {1:N0}/{2:N0}（{3}%），重置 {4}" -f $k, $q.remaining, $q.total, $q.percent, $q.reset)
                     }
-                } else { Write-Host "Agent Plan: 无缓存" }
+                } else { Write-Host "GLM Coding Plan: 无缓存" }
                 if ($cache.plans) {
                     Write-Host ("计划: {0} 项" -f $cache.plans.Count)
                     foreach ($item in $cache.plans) { Write-Host "  - $item" }
@@ -323,15 +292,6 @@ try {
             } else {
                 Write-Host "尚无渲染缓存（dashboard_data.json 不存在，先运行 preview 或 refresh）"
             }
-            if (Test-Path -LiteralPath $DataJsFile) {
-                $raw = [System.IO.File]::ReadAllText($DataJsFile, [System.Text.Encoding]::UTF8)
-                if ($raw -match '"fetched_at":\s*"([^"]+)"') {
-                    $fetched = [datetime]::Parse($Matches[1], $InvariantCulture)
-                    $ageMin = (New-TimeSpan -Start $fetched -End (Get-Date)).TotalMinutes
-                    $flag = if ($ageMin -gt $MaxDataJsAgeMinutes) { " [较旧! 检查看板监控是否在运行]" } else { "" }
-                    Write-Host ("AgentPlan data.js 更新: {0}（{1} 分钟前）{2}" -f $Matches[1], [math]::Round($ageMin, 1), $flag)
-                }
-            }
             Write-Log "status"
         }
         default {
@@ -339,7 +299,6 @@ try {
             Write-Host "  命令:"
             Write-Host "    refresh   更新全部并推送"
             Write-Host "    weather   只更新天气并推送"
-            Write-Host "    agentplan 只更新 Agent Plan 并推送"
             Write-Host "    plans     只更新计划并推送（可用 -PlansText 'a; b' 顺带改计划）"
             Write-Host "    news      只更新热点新闻并推送（跳过缓存TTL）"
             Write-Host "    markets   只更新行情并推送（跳过缓存TTL）"
@@ -348,7 +307,7 @@ try {
             Write-Host "    stock     强制重新生成智谱AI分析并推送到页5"
             Write-Host "    test      测试图案（-Pattern info|chess|white|black）"
             Write-Host "    clear     清屏（全白）"
-            Write-Host "    preview   只渲染不推送（-RenderMode full|today|weather|agentplan|plans|news|markets|analysis|stock）"
+            Write-Host "    preview   只渲染不推送（-RenderMode full|today|weather|plans|news|markets|analysis|stock）"
             Write-Host "    status    查看状态"
         }
     }

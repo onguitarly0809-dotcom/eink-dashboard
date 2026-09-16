@@ -83,10 +83,10 @@ def _quota_bar(draw, x0, x1, y, percent, segments=20, height=13, gap=3):
     draw.rectangle((x0, y - 4, x1, y + height + 4), outline=0, width=2)
 
 
-def render_agentplan(draw, panel_y, quotas, glm):
-    # Plan 额度：火山方舟已退订不再显示，GLM Coding Plan 单独成板。每个窗口一行：
+def render_glmplan(draw, panel_y, glm):
+    # Plan 额度：火山方舟已退订并删除抓取链路，GLM Coding Plan 单独成板。每个窗口一行：
     # 窗口名+同字号剩余%（20px，刻意低于日期52px/温度32px，页面视觉重心仍归日期）
-    # + 带外框的分段电量条 + 重置时间。quotas 参数保留只是兼容调用链。
+    # + 带外框的分段电量条 + 重置时间。
     if not (glm and glm.get("quotas")):
         glm = placeholder_glm()
     p1 = panel_y
@@ -142,12 +142,12 @@ def render_plans(draw, panel_y, plans, now):
         draw.text((PANEL_X + 18, p2 + PANEL_HEIGHT - 30), f"还有 {len(plans) - 5} 项", font=font(SIZE_S), fill=0)
 
 
-def render_dashboard(weather, plans, quotas, glm, now):
+def render_dashboard(weather, plans, glm, now):
     image = Image.new("L", (WIDTH, HEIGHT), 255)
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), outline=0, width=2)
     # 三个模块组件化布局，区域由 PANEL_Y 统一决定
     render_weather(draw, PANEL_Y[0], weather, now)
-    render_agentplan(draw, PANEL_Y[1], quotas, glm)
+    render_glmplan(draw, PANEL_Y[1], glm)
     render_plans(draw, PANEL_Y[2], plans, now)
     return image

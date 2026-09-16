@@ -11,7 +11,6 @@
 | `GLM_KEY` | 智谱 GLM 访问凭证 |
 | `GLM_ORG` | 智谱 GLM 组织标识 |
 | `GLM_PROJ` | 智谱 GLM 项目标识 |
-| `EPD_AGENT_PLAN_ENABLED` | 设为 `1` 时启用 Agent Plan 集成，默认关闭 |
 
 ## 本地文件
 
@@ -19,7 +18,6 @@
 
 - `dashboard_serial/plans.txt`
 - `dashboard_serial/glm_usage.conf`
-- `dashboard_serial/agent_plan_data.js`
 - `dashboard_serial/dashboard_data.json`
 - `dashboard_serial/page_state.json`
 - `dashboard_serial/hotkeys_status.json`

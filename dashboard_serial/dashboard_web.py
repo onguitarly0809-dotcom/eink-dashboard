@@ -28,7 +28,7 @@ INDEX_HTML = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 APP_JS = (WEB_DIR / "app.js").read_text(encoding="utf-8")
 
 # 动作 -> dashboard_control.ps1 命令。只收 UI 实际使用的动作：
-# 单模块强制刷新（weather/agentplan/news/markets）与 test_white 已删——
+# 单模块强制刷新（weather/news/markets）与 test_white 已删——
 # 与"切页 + force"及"清屏"重复；CLI 里这些命令仍可用，只是不走 Web。
 ACTION_CMD = {
     "refresh": "refresh",

@@ -8,15 +8,6 @@ def placeholder_weather(now):
     }
 
 
-def placeholder_quotas():
-    # 当arkcli不可用时，显示提示信息而不是全部为0
-    return {
-        "5小时": {"remaining": 0, "total": 100, "percent": 0, "reset": "权限问题"},
-        "周额度": {"remaining": 0, "total": 1000, "percent": 0, "reset": "权限问题"},
-        "月额度": {"remaining": 0, "total": 5000, "percent": 0, "reset": "权限问题"}
-    }
-
-
 def placeholder_glm():
     # GLM Coding Plan 获取失败时的占位：只有 5小时/每周两个窗口，无月额度
     return {

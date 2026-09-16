@@ -13,7 +13,6 @@ while ($true) {
     Write-Host "=========================================="
     Write-Host "  1) 完整刷新并推送（自动轮播 今日看板/新闻页/行情页/认知洞察页/智谱AI分析页）"
     Write-Host "  2) 只更新天气并推送"
-    Write-Host "  3) 只更新 Agent Plan 并推送"
     Write-Host "  4) 只更新计划并推送"
     Write-Host "  5) 只更新热点新闻并推送"
     Write-Host "  6) 修改计划内容并推送"
@@ -41,7 +40,6 @@ while ($true) {
     switch ($choice) {
         "1" { & $ControlPs1 refresh }
         "2" { & $ControlPs1 weather }
-        "3" { & $ControlPs1 agentplan }
         "4" { & $ControlPs1 plans }
         "5" { & $ControlPs1 news }
         "6" {

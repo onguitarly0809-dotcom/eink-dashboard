@@ -16,7 +16,6 @@ from epd_dashboard.config import (
     TTL_MINUTES,
 )
 from epd_dashboard.datastore import is_fresh, load_cache, mark_fetched, read_plans, save_cache
-from epd_dashboard.fetchers.agentplan import fetch_agent_plan
 from epd_dashboard.fetchers.analysis import in_generation_window, should_refresh
 from epd_dashboard.fetchers.glm import fetch_glm_plan
 from epd_dashboard.fetchers.markets import fetch_intraday, fetch_markets
@@ -25,7 +24,7 @@ from epd_dashboard.fetchers.insight import fetch_insight
 from epd_dashboard.fetchers.weather import fetch_weather
 from epd_dashboard.fetchers.zhipu_analysis import HK_SESSION_END, ZHIPU_CODE, fetch_zhipu_analysis
 from epd_dashboard.output import write_outputs
-from epd_dashboard.placeholders import placeholder_glm, placeholder_quotas, placeholder_weather
+from epd_dashboard.placeholders import placeholder_glm, placeholder_weather
 from epd_dashboard.renderers.page1_today import render_dashboard
 from epd_dashboard.renderers.page2_news import render_page2
 from epd_dashboard.renderers.page3_markets import render_page3
@@ -38,10 +37,10 @@ def main():
     parser = argparse.ArgumentParser(description="Render the 7.5-inch e-paper dashboard")
     parser.add_argument(
         "--mode",
-        choices=("full", "today", "weather", "agentplan", "plans", "news", "markets", "insight", "psychology", "analysis", "stock"),
+        choices=("full", "today", "weather", "plans", "news", "markets", "insight", "psychology", "analysis", "stock"),
         default="full",
-        help="which module to refresh: full=all, today=page1 only (weather/quotas/glm, TTL-gated), "
-             "weather, agentplan, plans, news, markets, insight, analysis, stock",
+        help="which module to refresh: full=all, today=page1 only (weather/glm, TTL-gated), "
+             "weather, plans, news, markets, insight, analysis, stock",
     )
     parser.add_argument(
         "--page",
@@ -90,7 +89,6 @@ def main():
     page = int(args.page)
     cache = load_cache()
     weather = cache.get("weather")
-    quotas = cache.get("quotas")
     glm = cache.get("glm")
     plans = cache.get("plans")
     news = cache.get("news")
@@ -100,7 +98,7 @@ def main():
     intraday = cache.get("intraday")
 
     # 切页 mode（today/news/markets）受 TTL 门控：缓存未过期直接用，按键秒出图。
-    # full（定时轮播，数据补给线）与手动单模块命令（weather/agentplan 等）不受限，始终联网；
+    # full（定时轮播，数据补给线）与手动单模块命令（weather 等）不受限，始终联网；
     # --force 再额外跳过切页 TTL。
     if args.mode in ("full", "weather", "today"):
         if args.mode == "today" and not args.force and is_fresh(cache, "weather", TTL_MINUTES["weather"], now):
@@ -114,26 +112,9 @@ def main():
             except Exception as exc:
                 print(f"WARN weather fetch failed, keep last value: {exc}", file=sys.stderr)
 
-    if args.mode in ("full", "agentplan", "today"):
-        quotas_fresh = (args.mode == "today" and not args.force
-                        and is_fresh(cache, "quotas", TTL_MINUTES["quotas"], now))
+    if args.mode in ("full", "today"):
         glm_fresh = (args.mode == "today" and not args.force
                      and is_fresh(cache, "glm", TTL_MINUTES["glm"], now))
-        if quotas_fresh:
-            print("quotas fresh, skip fetch", file=sys.stderr)
-        else:
-            try:
-                quotas = fetch_agent_plan()
-                cache["quotas"] = quotas
-                mark_fetched(cache, "quotas", now)
-                print("agent plan refreshed", file=sys.stderr)
-            except Exception as exc:
-                print(f"WARN agent plan fetch failed, keep last value: {exc}", file=sys.stderr)
-                # 如果获取失败且cache中没有数据，使用占位数据
-                if not cache.get("quotas"):
-                    quotas = placeholder_quotas()
-                    cache["quotas"] = quotas
-                    print("Using placeholder quotas due to fetch failure", file=sys.stderr)
         if glm_fresh:
             print("glm fresh, skip fetch", file=sys.stderr)
         else:
@@ -199,13 +180,13 @@ def main():
             print(f"WARN plans read failed: {exc}", file=sys.stderr)
 
     # 按页面确定必需模块：页1=天气/额度/计划，页2=新闻，页3/5=行情，页4=AI生成内容
-    data_map = {"weather": weather, "quotas": quotas, "plans": plans, "news": news, "markets": markets}
+    data_map = {"weather": weather, "plans": plans, "news": news, "markets": markets}
     if page in (3, 5):
         required = ("markets",)
     elif page == 2:
         required = ("news",)
     else:
-        required = ("weather", "quotas", "plans")
+        required = ("weather", "plans")
     missing_modules = [module for module in required if data_map[module] is None]
     if missing_modules:
          print(
@@ -218,9 +199,6 @@ def main():
     # 非必需模块缺失时用占位，避免渲染引用出错
     if weather is None:
         weather = placeholder_weather(now)
-    if quotas is None:
-        quotas = placeholder_quotas()
-        cache["quotas"] = quotas  # 更新cache中的占位数据
     if glm is None:
         glm = placeholder_glm()
         cache["glm"] = glm  # 更新cache中的占位数据
@@ -274,7 +252,7 @@ def main():
     elif page == 5:
         portrait = render_page5(markets, stock_analysis, intraday)
     else:
-        portrait = render_dashboard(weather, plans, quotas, glm, now)
+        portrait = render_dashboard(weather, plans, glm, now)
     portrait_path, preview_path, binary_path, packed_len = write_outputs(portrait, args)
     result = {
         "mode": args.mode,
