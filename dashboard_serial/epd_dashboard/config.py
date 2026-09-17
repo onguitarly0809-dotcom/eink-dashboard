@@ -118,6 +118,10 @@ INSIGHT_MAX_CHARS = 600
 INSIGHT_RECENT_TOPICS = 8      # Web 控制台展示的最近主题数
 INSIGHT_TOPIC_HISTORY = 120   # 持久去重历史，避免重复讲解同一主题
 INSIGHT_RETRY_COUNT = 3       # 主题重复或格式异常时的重试次数
+# Obsidian 归档目录：每次生成新洞察（轮播到页4 / 手动 analysis）同步写一份
+# Markdown 笔记；只在新生成时落盘，导出失败仅记 WARN 不影响刷新主链路
+INSIGHT_ARCHIVE_DIR = Path(os.getenv(
+    "INSIGHT_ARCHIVE_DIR", str(Path.home() / "Documents" / "Obsidian Vault" / "04-认知")))
 
 # ---------- 页2新闻 AI 摘要（2026-09-11 国内栏试点通过，同日铺开三栏） ----------
 # "模型通读全文 -> 一行精华"替代原始标题。正文来源限定在出口白名单内的站点：

@@ -24,6 +24,7 @@ from epd_dashboard.fetchers.insight import fetch_insight
 from epd_dashboard.fetchers.weather import fetch_weather
 from epd_dashboard.fetchers.zhipu_analysis import HK_SESSION_END, ZHIPU_CODE, fetch_zhipu_analysis
 from epd_dashboard.output import write_outputs
+from epd_dashboard.obsidian_export import archive_insight
 from epd_dashboard.placeholders import placeholder_glm, placeholder_weather
 from epd_dashboard.renderers.page1_today import render_dashboard
 from epd_dashboard.renderers.page2_news import render_page2
@@ -218,6 +219,9 @@ def main():
         try:
             analysis = fetch_insight(analysis, now=now)
             cache["analysis"] = analysis
+            archived = archive_insight(analysis, now=now)
+            if archived:
+                print(f"insight archived -> {archived}", file=sys.stderr)
             print("insight refreshed", file=sys.stderr)
         except Exception as exc:
             print(f"ERROR insight generation failed: {exc}", file=sys.stderr)

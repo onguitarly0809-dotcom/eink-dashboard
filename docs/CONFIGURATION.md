@@ -11,6 +11,7 @@
 | `GLM_KEY` | 智谱 GLM 访问凭证 |
 | `GLM_ORG` | 智谱 GLM 组织标识 |
 | `GLM_PROJ` | 智谱 GLM 项目标识 |
+| `INSIGHT_ARCHIVE_DIR` | 可选，页4认知洞察 Markdown 归档目录（默认 `~/Documents/Obsidian Vault/04-认知`） |
 
 ## 本地文件
 
