@@ -25,9 +25,11 @@ def _atomic_write(path, writer):
 
 def write_outputs(portrait, args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    portrait_path = args.output_dir / "dashboard_portrait.png"
-    preview_path = args.output_dir / "dashboard_preview.png"
-    binary_path = args.output_dir / "dashboard.bin"
+    # 页6横版天气用 _page6 后缀独立落盘，避免覆盖轮播正在推送的 dashboard.bin/preview
+    suffix = getattr(args, "output_suffix", "")
+    portrait_path = args.output_dir / f"dashboard{suffix}_portrait.png"
+    preview_path = args.output_dir / f"dashboard{suffix}_preview.png"
+    binary_path = args.output_dir / f"dashboard{suffix}.bin"
     landscape = rotate_for_epd(portrait, args.orientation)
     one_bit = landscape.convert("1", dither=Image.Dither.NONE)
     # EPD 固件 1=黑，PIL 打包 1=白，整体反转位 -> 屏幕白底黑字（浅色模式）

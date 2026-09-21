@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+control.log
+news_refresh.log
+web_console.log
+dashboard.bin
+dashboard_portrait.png
+dashboard_preview.png
+dashboard_data.json
+dashboard_data.json.tmp
+page_state.json
+hotkeys_status.json
+plans.txt
+preview_landscape/
+preview_font_unify/
+temp_debug_*
+temp_web_test.log

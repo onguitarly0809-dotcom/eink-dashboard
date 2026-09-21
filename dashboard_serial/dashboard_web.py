@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # dashboard_web.py — 墨水屏局域网 Web 控制台
 # 手机/平板浏览器直接推送单页、更新模块、修改计划，无需到电脑上跑脚本。
-# 页面资源在 web/index.html + web/app.js，与服务器逻辑分离。
+# 页面资源在 web/index.html + web/app.js，与服务器逻辑分离（启动时读入内存，改动需重启）。
 # 用法: python dashboard_web.py [--port 8080]
 import argparse
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -19,6 +21,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONTROL_PS1 = SCRIPT_DIR / "dashboard_control.ps1"
 PREVIEW_PNG = SCRIPT_DIR / "dashboard_preview.png"
+PAGE6_PREVIEW = SCRIPT_DIR / "dashboard_page6_preview.png"
 HOTKEY_STATUS = SCRIPT_DIR / "hotkeys_status.json"
 PAGE_STATE = SCRIPT_DIR / "page_state.json"
 DASHBOARD_CACHE = SCRIPT_DIR / "dashboard_data.json"
@@ -26,6 +29,23 @@ LOG_FILE = SCRIPT_DIR / "web_console.log"
 WEB_DIR = SCRIPT_DIR / "web"
 INDEX_HTML = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 APP_JS = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+# 页6 天气整页（竖版 CLI 支持 --page 6，PS1 未暴露）
+RENDER_PY = SCRIPT_DIR / "render_dashboard.py"
+# 横版全家桶在兄弟目录，入口参数与竖版完全一致；与竖版共用 COM 口和
+# Global\EPD_Dashboard_Control 互斥锁（横版推送用 PowerShell 包一层抢同一把锁）
+LANDSCAPE_DIR = SCRIPT_DIR.parent / "dashboard_serial_landscape"
+LANDSCAPE_RENDER = LANDSCAPE_DIR / "render_dashboard.py"
+LANDSCAPE_PREVIEW = LANDSCAPE_DIR / "dashboard_preview.png"
+LANDSCAPE_MODES = {1: "today", 2: "news", 3: "markets", 4: "insight", 5: "stock"}
+# 一键切换横竖版：切换脚本在仓库根（横竖两变体共用）
+SWITCH_PY = SCRIPT_DIR.parent / "switch_orientation.py"
+
+# 临时新闻任务（fetchers/news.py 的文件驱动机制）
+TEMP_TASK_FILE = SCRIPT_DIR / "temp_news_task.json"
+# 洞察归档目录，与 epd_dashboard/config.py INSIGHT_ARCHIVE_DIR 保持一致
+INSIGHT_ARCHIVE_DIR = Path(os.getenv(
+    "INSIGHT_ARCHIVE_DIR", str(Path.home() / "Documents" / "Obsidian Vault" / "04-认知")))
 
 # 动作 -> dashboard_control.ps1 命令。只收 UI 实际使用的动作：
 # 单模块强制刷新（weather/news/markets）与 test_white 已删——
@@ -56,7 +76,19 @@ ACTION_LABEL = {
     "clear": "清屏", "preview": "渲染预览",
     "preview_page4": "预览认知洞察",
     "test_info": "测试·信息卡", "test_chess": "测试·棋盘格", "test_black": "测试·全黑",
+    "page6": "推送页6·天气整页", "preview_page6": "预览页6·天气整页",
 }
+ACTION_LABEL["switch_landscape"] = "切换横版运营"
+for _n, _label in ((1, "今日"), (2, "新闻"), (3, "行情"), (4, "洞察"), (5, "智谱AI")):
+    ACTION_LABEL[f"landscape_preview_{_n}"] = f"横版预览·页{_n}{_label}"
+    ACTION_LABEL[f"landscape_push_{_n}"] = f"横版推送·页{_n}{_label}"
+
+# python 直连路由的动作（不走 dashboard_control.ps1）：
+# 页6 天气整页 + 横版六页预览/推送
+PY_ACTIONS = {f"landscape_preview_{n}" for n in LANDSCAPE_MODES}
+PY_ACTIONS |= {f"landscape_push_{n}" for n in LANDSCAPE_MODES}
+PY_ACTIONS |= {"page6", "preview_page6", "switch_landscape"}
+KNOWN_ACTIONS = set(ACTION_CMD) | PY_ACTIONS
 
 _state = {
     "running": False,
@@ -134,6 +166,55 @@ def append_log(line):
             del _state["log"][: len(_state["log"]) - MAX_LOG_LINES]
 
 
+def _ps_mutex_wrap(py_cmd):
+    """把横版推送包进 Global\EPD_Dashboard_Control 互斥锁：
+    与 dashboard_control.ps1（计划任务/热键/CLI）同一把锁，避免并发推送串口握手错乱。
+    参数逐个 PS 单引号转义——双引号/分号/空格都会被 PowerShell 拆坏。"""
+    def q(a):
+        # PS 单引号内的单引号写成两个；双引号要 \" 给原生命令行还原
+        return "'" + str(a).replace("'", "''").replace('"', '\\"') + "'"
+    inner = " ".join(q(a) for a in py_cmd)
+    return [
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$m = New-Object System.Threading.Mutex($false, 'Global\\EPD_Dashboard_Control'); "
+        "if (-not $m.WaitOne(0)) { Write-Output 'mutex busy: another dashboard task is running'; exit 1 } "
+        "try { & " + inner + "; exit $LASTEXITCODE } "
+        "finally { $m.ReleaseMutex() | Out-Null; $m.Dispose() }",
+    ]
+
+
+def _build_cmd(action, pattern, planstext, force):
+    """返回 (cmd, cwd)。默认走 dashboard_control.ps1；页6/横版动作 python 直连渲染入口。"""
+    if action in ("page6", "preview_page6"):
+        cmd = [sys.executable, str(RENDER_PY), "--mode", "weather", "--page", "6"]
+        if action == "page6":
+            cmd.append("--push")
+        return cmd, str(SCRIPT_DIR)
+    if action == "switch_landscape":
+        return ([sys.executable, str(SWITCH_PY), "landscape"], str(SCRIPT_DIR.parent))
+    if action.startswith("landscape_"):
+        kind, _, num = action.rpartition("_")
+        mode = LANDSCAPE_MODES.get(int(num))
+        if mode is None:
+            raise ValueError(f"unknown landscape page: {action}")
+        cmd = [sys.executable, str(LANDSCAPE_RENDER), "--mode", mode, "--page", num]
+        if kind == "landscape_push":
+            cmd.append("--push")
+            return _ps_mutex_wrap(cmd), str(LANDSCAPE_DIR)
+        return cmd, str(LANDSCAPE_DIR)
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+           "-File", str(CONTROL_PS1), ACTION_CMD.get(action, action)]
+    if pattern:
+        cmd += ["-Pattern", pattern]
+    if planstext:
+        cmd += ["-PlansText", planstext]
+    if force:
+        cmd += ["-Force"]
+    if action == "preview_page4":
+        cmd += ["-RenderMode", "insight", "-Page", "4"]
+    return cmd, str(SCRIPT_DIR)
+
+
 def run_action(action, pattern=None, planstext=None, force=False):
     """后台执行 dashboard_control.ps1 动作；同一时间只允许一个动作。
 
@@ -150,21 +231,21 @@ def run_action(action, pattern=None, planstext=None, force=False):
 
     def worker():
         append_log(f"[{time.strftime('%H:%M:%S')}] 开始：{label}{'（强制联网）' if force else ''}")
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-               "-File", str(CONTROL_PS1), ACTION_CMD.get(action, action)]
-        if pattern:
-            cmd += ["-Pattern", pattern]
-        if planstext:
-            cmd += ["-PlansText", planstext]
-        if force:
-            cmd += ["-Force"]
-        if action == "preview_page4":
-            cmd += ["-RenderMode", "insight", "-Page", "4"]
+        try:
+            cmd, cwd = _build_cmd(action, pattern, planstext, force)
+        except ValueError as exc:
+            with _state_lock:
+                _state["running"] = False
+                _state["ok"] = False
+                _state["action"] = ""
+                _state["last_action"] = action
+            append_log(f"[错误] {exc}")
+            return
         ok = False
         skipped = False
         try:
             proc = subprocess.Popen(
-                cmd, cwd=str(SCRIPT_DIR), stdout=subprocess.PIPE,
+                cmd, cwd=cwd, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True,
                 encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -173,7 +254,7 @@ def run_action(action, pattern=None, planstext=None, force=False):
                 line = line.rstrip()
                 if line:
                     append_log(line)
-                    if "another instance holds the mutex" in line:
+                    if "another instance holds the mutex" in line or line.startswith("mutex busy"):
                         skipped = True
             proc.wait()
             ok = proc.returncode == 0 and not skipped
@@ -201,6 +282,192 @@ def validate_plans(items):
     if len(cleaned) > 5:
         return None, "最多 5 个计划（屏幕显示上限）"
     return cleaned, None
+
+
+# ---------- 只读数据面板：缓存 JSON + 串口探测 + 临时任务 + 洞察归档 ----------
+
+def _read_cache():
+    try:
+        return json.loads(DASHBOARD_CACHE.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+# 各模块缓存新鲜度上界（分钟）。与 config.TTL_MINUTES 对齐；行情盘中 3 分钟/收盘 60 分钟
+# 的交易时段判定不在此复刻，展示用 60 分钟上界即可。
+_FRESHNESS_TTL = {"weather": 30, "news": 10, "glm": 30, "markets": 60, "intraday": 10}
+
+
+def _ages(data, now=None):
+    now = now or datetime.now()
+    ages = {}
+    for mod, ttl in _FRESHNESS_TTL.items():
+        fetched = ((data.get("_meta") or {}).get(mod) or {}).get("fetched_at")
+        try:
+            age = max(0.0, round(((now - datetime.fromisoformat(fetched)).total_seconds() / 60), 1))
+        except (TypeError, ValueError):
+            age = None
+        ages[mod] = {"age_min": age, "ttl_min": ttl, "fresh": age is not None and age < ttl}
+    return ages
+
+
+def serial_ports():
+    """COM 口列表 + CP210x（墨水屏驱动板 VID:PID 10C4:EA60）标记，结果缓存 30 秒。"""
+    global _serial_ts, _serial_ports
+    if time.time() - _serial_ts < 30:
+        return _serial_ports
+    ports = []
+    try:
+        from serial.tools import list_ports
+        for p in list_ports.comports():
+            hwid = (p.hwid or "") + " " + (p.description or "")
+            ports.append({
+                "device": p.device,
+                "desc": p.description or "",
+                "epd": "10C4:EA60" in hwid.upper(),
+            })
+    except Exception:
+        pass
+    ports.sort(key=lambda x: x["device"])
+    _serial_ports, _serial_ts = ports, time.time()
+    return ports
+
+
+_serial_ts, _serial_ports = 0.0, []
+
+
+def overview_payload():
+    data = _read_cache()
+    glm = data.get("glm") or {}
+    weather = data.get("weather") or {}
+    stock = data.get("stock_analysis") or {}
+    analysis = data.get("analysis") or {}
+    return {
+        "page": current_page(),
+        "next_page": (current_page() % 5) + 1,
+        "ages": _ages(data),
+        "glm": {"level": glm.get("level"), "quotas": glm.get("quotas") or {}},
+        "weather_now": {k: weather.get(k) for k in
+                        ("temperature", "description", "high", "low", "feels", "wind",
+                         "humidity", "city", "updated", "alert") if k in weather},
+        "insight": {k: analysis.get(k) for k in ("topic", "domain", "updated", "stale") if k in analysis},
+        "stock": {k: stock.get(k) for k in ("price", "pct", "updated", "stale") if k in stock},
+        "hotkeys": hotkey_status(),
+        "serial": serial_ports(),
+        "temp_task": temp_task_summary(),
+    }
+
+
+def data_payload():
+    data = _read_cache()
+    weather = dict(data.get("weather") or {})
+    hourly = weather.get("hourly") or {}
+    if hourly:  # 36 点只取前 24，Web 一天的走势足够
+        weather["hourly"] = {k: (v[:24] if isinstance(v, list) else v) for k, v in hourly.items()}
+    news = data.get("news") or {}
+    news = {k: news.get(k) for k in (
+        "updated", "domestic", "international", "ai", "stale",
+        "domestic_source", "international_source", "ai_source",
+        "domestic_pinned", "international_pinned", "ai_pinned",
+        "domestic_badge", "international_badge", "summaries")}
+    markets = data.get("markets") or {}
+    markets = {k: markets.get(k) for k in ("companies", "quotes", "sectors", "updated", "stale")}
+    return {
+        "weather": weather,
+        "news": news,
+        "markets": markets,
+        "intraday": data.get("intraday") or {},
+        "glm": data.get("glm") or {},
+    }
+
+
+def temp_task_summary():
+    try:
+        task = json.loads(TEMP_TASK_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(task, dict):
+        return None
+    return {k: task.get(k) for k in
+            ("enabled", "query", "match", "require_price", "band", "badge", "last_hit")}
+
+
+TEMP_BANDS = {"domestic": "国内", "international": "国际", "ai": "AI"}
+
+
+def temp_task_save(payload):
+    """校验并写 temp_news_task.json。字段语义与 fetchers/news.py 注释一致。"""
+    if not isinstance(payload, dict):
+        return "任务格式错误"
+    query = str(payload.get("query", "")).strip()
+    match = str(payload.get("match", "")).strip()
+    if not query:
+        return "搜索词不能为空"
+    if not match:
+        return "标题匹配正则不能为空"
+    try:
+        re.compile(match, re.IGNORECASE)
+    except re.error as exc:
+        return f"正则无效：{exc}"
+    band = str(payload.get("band", "domestic"))
+    if band not in TEMP_BANDS:
+        return "置顶栏目必须是 domestic/international/ai"
+    task = {
+        "enabled": bool(payload.get("enabled", True)),
+        "query": query,
+        "match": match,
+        "require_price": bool(payload.get("require_price", True)),
+        "band": band,
+        "badge": str(payload.get("badge", "价")).strip()[:4] or "价",
+    }
+    # 保留历史命中（粘性置顶依赖 last_hit 跨刷新存续）
+    old = temp_task_summary()
+    if old and old.get("last_hit"):
+        task["last_hit"] = old["last_hit"]
+    try:
+        TEMP_TASK_FILE.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return f"写入失败：{exc}"
+    return None
+
+
+def temp_task_stop():
+    old = temp_task_summary()
+    if not old:
+        return "当前没有任务"
+    task = dict(old)
+    task["enabled"] = False
+    try:
+        TEMP_TASK_FILE.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return f"写入失败：{exc}"
+    return None
+
+
+def insight_archive_list():
+    """Obsidian 归档目录下的洞察笔记清单（mtime 倒序，最多 60 条）。"""
+    if not INSIGHT_ARCHIVE_DIR.is_dir():
+        return []
+    items = []
+    for f in INSIGHT_ARCHIVE_DIR.glob("*.md"):
+        try:
+            items.append({"name": f.name, "mtime": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="minutes")})
+        except OSError:
+            continue
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items[:60]
+
+
+def insight_archive_read(name):
+    """读单个归档笔记。仅允许归档目录直下的 .md，杜绝路径穿越。"""
+    if not name.endswith(".md") or "/" in name or "\\" in name or name.startswith("."):
+        return None, "非法文件名"
+    path = (INSIGHT_ARCHIVE_DIR / name).resolve()
+    if path.parent != INSIGHT_ARCHIVE_DIR.resolve() or not path.is_file():
+        return None, "文件不存在"
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except Exception as exc:
+        return None, f"读取失败：{exc}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -254,25 +521,68 @@ class Handler(BaseHTTPRequestHandler):
                 "page4": insight_status(),
                 "hotkeys": hotkey_status(),
             })
-        elif parsed.path == "/preview.png":
-            # 渲染进程用 tmp+rename 原子替换预览图；这里读到异常（半截/正被替换）时按无图处理
+        elif parsed.path == "/api/overview":
+            self._send_json(overview_payload())
+        elif parsed.path == "/api/data":
+            self._send_json(data_payload())
+        elif parsed.path == "/api/tempnews":
+            self._send_json({"task": temp_task_summary(), "bands": TEMP_BANDS})
+        elif parsed.path == "/api/insights":
+            # urlparse().path 不含查询串，文件读取必须按 query 参数分流
+            qs = urllib.parse.parse_qs(parsed.query)
+            req_file = (qs.get("file") or [""])[0]
+            if req_file:
+                content, err = insight_archive_read(req_file)
+                if err:
+                    self._send_json({"ok": False, "message": err}, 400)
+                else:
+                    self._send_json({"ok": True, "name": req_file, "content": content})
+                return
+            analysis = self._read_analysis() or {}
+            stock = {}
             try:
-                body = PREVIEW_PNG.read_bytes()
+                stock = json.loads(DASHBOARD_CACHE.read_text(encoding="utf-8-sig")).get("stock_analysis") or {}
             except Exception:
-                body = None
-            if body:
-                self._send_bytes(body, "image/png")
-            else:
-                self._send_json({"ok": False, "message": "暂无预览图"}, 404)
+                pass
+            stock = {k: stock.get(k) for k in ("text", "model", "price", "pct", "updated", "stale", "web_search")}
+            self._send_json({
+                "archive": insight_archive_list(),
+                "topic_history": analysis.get("topic_history"),
+                "stock": stock,
+            })
+        elif parsed.path == "/preview_page6.png":
+            self._serve_png(PAGE6_PREVIEW)
+        elif parsed.path == "/preview_landscape.png":
+            self._serve_png(LANDSCAPE_PREVIEW)
+        elif parsed.path == "/preview.png":
+            self._serve_png(PREVIEW_PNG)
         else:
             self._send_json({"ok": False, "message": "not found"}, 404)
+
+    def _serve_png(self, path):
+        # 渲染进程用 tmp+rename 原子替换预览图；这里读到异常（半截/正被替换）时按无图处理
+        try:
+            body = path.read_bytes()
+        except Exception:
+            body = None
+        if body:
+            self._send_bytes(body, "image/png")
+        else:
+            self._send_json({"ok": False, "message": "暂无预览图"}, 404)
+
+    @staticmethod
+    def _read_analysis():
+        try:
+            return json.loads(DASHBOARD_CACHE.read_text(encoding="utf-8-sig")).get("analysis")
+        except Exception:
+            return None
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/action":
             data = self._read_json()
             action = str(data.get("action", "")).strip()
-            if action not in ACTION_CMD:
+            if action not in KNOWN_ACTIONS:
                 self._send_json({"ok": False, "message": f"未知动作: {action}"}, 400)
                 return
             pattern = action.split("_", 1)[1] if action.startswith("test_") else None
@@ -282,6 +592,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "已有任务运行中，请稍候"}, 409)
                 return
             self._send_json({"ok": True})
+        elif parsed.path == "/api/tempnews":
+            data = self._read_json()
+            op = str(data.get("op", ""))
+            if op == "stop":
+                err = temp_task_stop()
+            elif op == "save":
+                err = temp_task_save(data.get("task"))
+            else:
+                err = "op 必须是 save 或 stop"
+            if err:
+                self._send_json({"ok": False, "message": err}, 400)
+                return
+            self._send_json({"ok": True, "task": temp_task_summary()})
         elif parsed.path == "/api/plans":
             data = self._read_json()
             items, err = validate_plans(data.get("items", []))

@@ -31,6 +31,7 @@ from epd_dashboard.renderers.page2_news import render_page2
 from epd_dashboard.renderers.page3_markets import render_page3
 from epd_dashboard.renderers.page4_analysis import render_page4
 from epd_dashboard.renderers.page5_zhipu import render_page5
+from epd_dashboard.renderers.page6_weather import render_page6
 from epd_dashboard.renderers.test_pattern import render_test
 
 
@@ -45,9 +46,9 @@ def main():
     )
     parser.add_argument(
         "--page",
-        choices=("1", "2", "3", "4", "5"),
+        choices=("1", "2", "3", "4", "5", "6"),
         default="1",
-        help="which page to render: 1=今日看板 V1.0, 2=三栏新闻, 3=行情, 4=AI认知洞察, 5=智谱AI走势归因",
+        help="which page to render: 1=今日看板 V1.0, 2=三栏新闻, 3=行情, 4=AI认知洞察, 5=智谱AI走势归因, 6=横版天气整页",
     )
     parser.add_argument(
         "--test-pattern",
@@ -186,6 +187,8 @@ def main():
         required = ("markets",)
     elif page == 2:
         required = ("news",)
+    elif page == 6:
+        required = ("weather",)
     else:
         required = ("weather", "plans")
     missing_modules = [module for module in required if data_map[module] is None]
@@ -255,6 +258,12 @@ def main():
         portrait = render_page4(analysis)
     elif page == 5:
         portrait = render_page5(markets, stock_analysis, intraday)
+    elif page == 6:
+        portrait = render_page6(weather, now)
+        # 页6直接画 800×480 横版画布：硬件顺时针转90°后面板回到原生横向，帧缓冲无需旋转；
+        # 输出用 _page6 独立文件名，不覆盖轮播正在推送的 dashboard.bin
+        args.orientation = "none"
+        args.output_suffix = "_page6"
     else:
         portrait = render_dashboard(weather, plans, glm, now)
     portrait_path, preview_path, binary_path, packed_len = write_outputs(portrait, args)

@@ -38,3 +38,7 @@ $env:GLM_KEY = "<访问凭证>"
 $env:GLM_ORG = "<组织标识>"
 $env:GLM_PROJ = "<项目标识>"
 ```
+
+## 横版变体
+
+`dashboard_serial_landscape/` 使用与竖版完全相同的环境变量（`EPD_SERIAL_PORT`、`EPD_WEATHER_LATITUDE/LONGITUDE`、`INSIGHT_ARCHIVE_DIR` 等），无需额外配置。

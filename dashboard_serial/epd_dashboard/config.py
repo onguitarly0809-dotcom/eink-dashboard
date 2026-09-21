@@ -53,16 +53,20 @@ ALLOWED_HTTP_HOSTS = {
 }
 
 # ---------- 数据源 URL ----------
+# 页6天气整页需要体感/气压/风向/逐时曲线/多日预报；页1只用其中实况子集
+WEATHER_CITY = os.getenv("EPD_WEATHER_CITY", "北京")
 WEATHER_URL = (
     "https://api.open-meteo.com/v1/forecast?"
     + urllib.parse.urlencode(
         {
             "latitude": os.getenv("EPD_WEATHER_LATITUDE", "39.9042"),
             "longitude": os.getenv("EPD_WEATHER_LONGITUDE", "116.4074"),
-            "current": "temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m,uv_index",
-            "daily": "temperature_2m_max,temperature_2m_min",
+            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
+                       "precipitation_probability,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m,uv_index",
+            "hourly": "temperature_2m,precipitation_probability",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code,sunrise,sunset",
             "timezone": "Asia/Shanghai",
-            "forecast_days": 1,
+            "forecast_days": 6,
         }
     )
 )
