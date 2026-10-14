@@ -2,7 +2,12 @@
 
 墨水屏硬件**横放**（800×480 原生方向，从竖放顺时针转 90°）的整页看板变体，五页：
 今日看板（田字格+月历+洗车指数）/ 三栏新闻（24 字 AI 摘要）/ 行情 / 认知洞察
-（固定分栏+机制流程图）/ 智谱AI 走势归因。竖版 `../dashboard_serial/` 完整保留。
+（固定分栏+机制流程图）/ 智谱AI 走势归因。
+
+> **2026-09-23 重构**：横竖两份 `epd_dashboard` 拷贝合并为仓库根共享包（版式差异在
+> `epd_dashboard/layouts/landscape.py`，渲染器在 `renderers/landscape/`）。本目录保留
+> 运行期文件、字体资产（fonts/ 含宋体/tabler）、web 前端与薄入口；回退点：git 标签
+> `pre-refactor-20260923`。竖版 `../dashboard_serial/` 同构保留。
 
 ## 运营层（已从竖版迁移，2026-09-21 起默认横版运营）
 
@@ -63,7 +68,7 @@ python render_dashboard.py --mode weather --page 6 --push
 - `fonts.py`：像素字优先 + 格栅吸附（竖版仍为思源黑体）
 - `renderers/common.py`：`draw_box`（chip 标题/1px）、抖动件、chip/label/text_bold
 - 所有页面直接画 800×480 画布，`--orientation` 默认 `none`
-- 输出/缓存/日志都落在本目录，串口由 `EPD_SERIAL_PORT` 环境变量或 `-PortName` 指定：**两个变体不要同时推送**
+- 输出/缓存/日志都落在本目录，串口由 `EPD_SERIAL_PORT` 指定：**两个变体不要同时推送**
 
 ## 尚未迁移（仍在竖版目录）
 

@@ -1,41 +1,22 @@
 #!/usr/bin/env python3
-"""兼容入口：实际实现已拆分到 epd_dashboard 包。
+"""竖版入口（480x800 竖屏渲染，页1-6，推送前旋转到固件 800x480 栅格）。
 
-保留本文件是因为 dashboard_control.ps1 / 计划任务 / 测试脚本都以
-`python render_dashboard.py --mode X --page N` 方式调用，并有人以
-`import render_dashboard` 访问模块级常量（如 NEWS_SOURCES）。
+实现已收归仓库根的共享包 epd_dashboard/；本文件只做变体引导：
+设置 EPD_VARIANT/EPD_BASE_DIR 并把仓库根挂上 sys.path。调用方式保持不变：
+    python render_dashboard.py --mode full            # 全量抓数据 + 页1
+    python render_dashboard.py --mode weather --page 6
 """
-from epd_dashboard.cli import main
-from epd_dashboard.config import (
-    DATA_CACHE_FILE,
-    EPD_HEIGHT,
-    EPD_IMAGE_BYTES,
-    EPD_ROW_BYTES,
-    EPD_WIDTH,
-    HEIGHT,
-    MARKET_COMPANY_SYMBOLS,
-    MARKET_GROUPS,
-    MARKET_SECTOR_URL,
-    MARKET_URL_TENCENT,
-    PANEL_HEIGHT,
-    PANEL_WIDTH,
-    PANEL_X,
-    PANEL_Y,
-    WEATHER_ALERT_URL,
-    WEATHER_URL,
-    WIDTH,
-)
-from epd_dashboard.datastore import load_cache, read_plans, save_cache
-from epd_dashboard.fetchers.glm import fetch_glm_plan
-from epd_dashboard.fetchers.markets import AKSHARE_AVAILABLE, fetch_markets
-from epd_dashboard.fetchers.news import NEWS_PER_BAND, NEWS_SOURCES, NEWS_TITLES, fetch_news
-from epd_dashboard.fetchers.weather import fetch_weather, fetch_weather_alert
-from epd_dashboard.output import rotate_for_epd, write_outputs
-from epd_dashboard.placeholders import placeholder_glm, placeholder_weather
-from epd_dashboard.renderers.page1_today import render_dashboard, render_glmplan, render_plans, render_weather
-from epd_dashboard.renderers.page2_news import render_page2
-from epd_dashboard.renderers.page3_markets import render_page3
-from epd_dashboard.renderers.test_pattern import render_test
+import os
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+os.environ.setdefault("EPD_VARIANT", "portrait")
+os.environ.setdefault("EPD_BASE_DIR", str(_HERE))
+sys.path.insert(0, str(_ROOT))
+
+from epd_dashboard.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

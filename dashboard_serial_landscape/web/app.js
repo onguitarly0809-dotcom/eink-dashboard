@@ -61,16 +61,39 @@ function showPlanInputs() {
   const n = parseInt($('planCount').value);
   let h = '';
   for (let i = 1; i <= n; i++) {
-    h += '<div class="item"><span>计划' + i + '</span><input id="p' + i + '" maxlength="40" placeholder="输入计划内容"></div>';
+    // 优先级下拉：选项数=当前任务数（3条任务→P0/P1/P2），第i行默认Pi-1
+    let opts = '';
+    for (let k = 0; k < n; k++) {
+      opts += '<option value="P' + k + '"' + (k === i - 1 ? ' selected' : '') + '>P' + k + '</option>';
+    }
+    h += '<div class="item"><span>计划' + i + '</span><select id="pr' + i + '">' + opts + '</select>'
+       + '<input id="p' + i + '" maxlength="40" placeholder="输入计划内容"></div>';
   }
   $('planInputs').innerHTML = h;
+}
+let plansFilled = false;
+function fillPlans(plans) {
+  // 首次加载预填当前计划（带 [Px] 前缀的拆回下拉+正文；无前缀的按行序给默认档）
+  if (plansFilled || !Array.isArray(plans) || !plans.length) { plansFilled = true; return; }
+  plansFilled = true;
+  const n = Math.min(5, plans.length);
+  $('planCount').value = String(n);
+  showPlanInputs();
+  plans.slice(0, n).forEach((raw, i) => {
+    // 兼容两种格式：规范的 [P0] 前缀与历史的无括号 "P0 " 前缀
+    const m = raw.match(/^\[([^\[\]]{1,6})\]\s*/) || raw.match(/^(P\d)\s+/);
+    const sel = $('pr' + (i + 1));
+    if (m && sel && [...sel.options].some(o => o.value === m[1])) sel.value = m[1];
+    $('p' + (i + 1)).value = m ? raw.slice(m[0].length) : raw;
+  });
 }
 function submitPlans() {
   const n = parseInt($('planCount').value);
   const items = [];
   for (let i = 1; i <= n; i++) {
     const v = $('p' + i).value.trim();
-    if (v) items.push(v);
+    // 优先级并入条目文本前缀 [Px]，页1 渲染端按此正则解析展示
+    if (v) items.push('[' + $('pr' + i).value + '] ' + v);
   }
   if (!items.length) { alert('请至少输入一个计划'); return; }
   api('/api/plans', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({items})})
@@ -173,6 +196,7 @@ function fetchOverview() {
   api('/api/overview').then(renderOverview).catch(() => {});
 }
 function renderOverview(o) {
+  fillPlans(o.plans);
   $('ovNext').textContent = o.next_page ? '页' + o.next_page : '–';
   const w = o.weather_now || {};
   $('ovCity').textContent = w.city || '–';

@@ -25,9 +25,9 @@ def find_pythonw():
     if os.environ.get("EPD_PYTHON"):
         cands.append(os.environ["EPD_PYTHON"].replace("python.exe", "pythonw.exe"))
     import shutil
-    found = shutil.which("pythonw.exe")
-    if found:
-        cands.append(found)
+    which = shutil.which("pythonw")
+    if which:
+        cands.append(which)
     for c in cands:
         if Path(c).exists():
             return c

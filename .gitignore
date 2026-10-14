@@ -23,3 +23,12 @@ dashboard_serial/plans.txt
 dashboard_serial/glm_usage.conf
 dashboard_serial/agent_plan_data.js
 dashboard_serial/.arduino-build/
+
+# Mail monitor runtime files (mail_config.json holds credentials)
+mail_config.json
+mail_state.json
+mail_inbox.json
+mail_monitor.lock
+mail_base.png
+# GLM credentials fallback file (any variant dir)
+glm_usage.conf

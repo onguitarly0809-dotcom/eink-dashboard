@@ -7,6 +7,7 @@
 #define EPD_HEIGHT 480
 #define EPD_ROW_BYTES (EPD_WIDTH / 8)
 #define EPD_IMAGE_BYTES (EPD_ROW_BYTES * EPD_HEIGHT)
+#define EPD_IMAGE_BYTES_4G (EPD_IMAGE_BYTES * 2)
 
 #define EPD_SCK_PIN 14
 #define EPD_MOSI_PIN 13
@@ -76,7 +77,7 @@ static void epd_reset() {
   delay(200);
 }
 
-static bool epd_init() {
+static void epd_pins_setup() {
   pinMode(EPD_SCK_PIN, OUTPUT);
   pinMode(EPD_MOSI_PIN, OUTPUT);
   pinMode(EPD_CS_PIN, OUTPUT);
@@ -85,7 +86,10 @@ static bool epd_init() {
   pinMode(EPD_BUSY_PIN, INPUT);
   digitalWrite(EPD_CS_PIN, HIGH);
   digitalWrite(EPD_SCK_PIN, LOW);
+}
 
+static bool epd_init() {
+  epd_pins_setup();
   epd_reset();
   epd_command(0x01);
   epd_data_byte(0x07);
@@ -139,6 +143,61 @@ static bool epd_refresh_and_sleep() {
   if (!epd_wait_idle()) {
     return false;
   }
+  epd_command(0x02);
+  if (!epd_wait_idle()) {
+    return false;
+  }
+  epd_command(0x07);
+  epd_data_byte(0xa5);
+  return true;
+}
+
+// ===== 四灰模式（2026-09 方案四）=====
+// 时序严格照抄微雪 EPD_7IN5_V2.c（RaspberryPi_JetsonNano/c/lib）：
+// Init_4Gray / Display_4Gray / Sleep。帧数据 = PC 预编码的两张 1bpp 位平面
+// （0x10=黑+深灰，0x13=黑+浅灰），固件只做流式转发，零转换零额外 RAM。
+
+static bool epd_init_4gray() {
+  epd_pins_setup();
+  epd_reset();
+  epd_command(0x00);
+  epd_data_byte(0x1f);
+  epd_command(0x50);
+  epd_data_byte(0x10);
+  epd_data_byte(0x07);
+  epd_command(0x04);
+  delay(100);
+  if (!epd_wait_idle()) {
+    return false;
+  }
+  epd_command(0x06);
+  epd_data_byte(0x27);
+  epd_data_byte(0x27);
+  epd_data_byte(0x18);
+  epd_data_byte(0x17);
+  epd_command(0xe0);
+  epd_data_byte(0x02);
+  epd_command(0xe5);
+  epd_data_byte(0x5f);
+  return true;
+}
+
+static void epd_begin_stream_4gray() {
+  epd_command(0x10);  // 第一平面（旧帧 RAM）
+}
+
+static void epd_switch_plane_4gray() {
+  epd_command(0x13);  // 第二平面（新帧 RAM）：48000B 恰好整行对齐，行边界切换
+}
+
+static bool epd_refresh_and_sleep_4gray() {
+  epd_command(0x12);
+  delay(100);
+  if (!epd_wait_idle()) {  // 默认 25s 超时 > 4灰全刷实测 10-16s
+    return false;
+  }
+  epd_command(0x50);
+  epd_data_byte(0xf7);     // 厂商 4 灰 Sleep 前置 VCOM 设置
   epd_command(0x02);
   if (!epd_wait_idle()) {
     return false;

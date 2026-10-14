@@ -1,0 +1,11 @@
+{
+  "account": "你的QQ邮箱@qq.com",
+  "auth_code": "QQ邮箱16位授权码",
+  "host": "imap.qq.com",
+  "port": 993,
+  "min_push_gap_seconds": 180,
+  "batch_window_seconds": 25,
+  "max_pending_seconds": 300,
+  "max_show": 3,
+  "overlay_seconds": 600
+}
