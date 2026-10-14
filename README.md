@@ -1,61 +1,41 @@
 # E-Ink Dashboard
 
-一个运行在 Windows 上的 7.5 英寸墨水屏信息看板，支持天气、新闻、行情、认知洞察和个股走势分析。项目包含 Python 渲染端、Web 控制台、全局热键、串口推送和 ESP8266 固件；另提供 800x480 原生横版变体 `dashboard_serial_landscape/`（同一套数据链路，见下文「横版变体」）。
+一个面向 7.5 英寸墨水屏的多页信息看板，支持天气、新闻、行情、认知洞察、个股走势分析和新邮件提醒。项目包含 Python 渲染端、Web 控制台、全局热键、串口推送和 ESP8266 固件，横版（800×480，当前运营）与竖版（480×800）共用一套核心代码。
 
 ## 功能
 
-- **页1 今日看板**：天气、额度、本地计划
-- **页2 三栏新闻**：国内、国际、AI
-- **页3 行情**：自选标的、板块热点、市场参考
-- **页4 认知洞察**：脑科学、认知提升、情绪管理、心理学、学习方法、行为设计；每次生成的新主题会同步归档为 Markdown 笔记到 Obsidian 仓库（目录可用 `INSIGHT_ARCHIVE_DIR` 配置，默认 `~/Documents/Obsidian Vault/04-认知`）
-- **页5 个股走势分析**：走势、消息面、板块联动、政策与国际环境
+- **页1 今日看板**：天气、GLM 额度、工作计划（横版含月历、节假日/调休标记与计划优先级标签）
+- **页2 三栏新闻**：国内、国际、AI（AI 逐篇通读全文生成一行精华摘要）
+- **页3 行情**：自选股、板块热点（含冷板块领跌个股）、市场参考
+- **页4 认知洞察**：脑科学、认知提升、情绪管理、心理学、学习方法、行为设计等（逐节字数配额硬校验，新主题自动归档 Markdown 笔记到 Obsidian）
+- **页5 智谱AI走势分析**：个股走势、消息面、板块联动、政策与国际环境
+- **页6 天气整页**（竖版专属）：逐时曲线、多日预报、生活指数
+- **新邮件弹窗提醒**：IMAP IDLE 秒级感知新邮件，在当前页面上叠加"二级菜单"式弹窗卡片（发件人/主题/到点时间，最多 3 封），10 分钟后自动收起并像素级还原被覆盖页；突发多封合并推送、最小间隔防刷屏；QQ 邮箱授权码即用，Gmail 可经自动转发接入同一链路
+- **四灰模式**（横版）：轮播/切页恒四灰推送，正文灰阶抗锯齿无锯齿；接受边框外围一圈浅灰（四灰固有特性），需要彻底重置时手动 `clear` 全白清屏
+
+## 架构
+
+横竖两个运营目录共用仓库根的核心包，差异全部收敛到版式模块：
+
+```
+epd_dashboard/                  共享核心包（config+layouts+fetchers+renderers+cli/web/hotkeys/mail_monitor）
+├── layouts/landscape|portrait  横竖差异的唯一来源：版面锚点/字数配额/字重/默认方向
+├── renderers/landscape|portrait  两套页面渲染器（V3 像素+宋体 / V2 黑体）
+dashboard_serial_landscape/     横版运营目录：薄入口 + 字体/web 前端 + 运行期文件
+dashboard_serial/               竖版运营目录：同构（含固件 dashboard_serial.ino）
+ops/                            PS1 共享层：control/menu/send/setup（变体委托调用）
+tools/ tests/                   离线全页渲染回归工具 / 单元与对拍测试
+switch_orientation.py           横竖运营一键切换
+```
+
+四个入口（计划任务轮播 / Web 控制台 / 全局热键 / 手动 CLI）共用一把全局互斥锁；邮件监控等用户向动作遇轮播占锁时排队等待。
 
 ## 技术栈
 
-- Python 3.11+
-- Pillow
-- pyserial
-- lunar-python
-- akshare（可选）
+- Python 3.11（Pillow / pyserial / lunar_python / akshare）
 - PowerShell 5.1
-- Arduino / ESP8266
+- Arduino / ESP8266（NodeMCU 1.0 / ESP-12E）
 - HTML / CSS / JavaScript
-
-## 目录结构
-
-```text
-dashboard_serial/
-├── epd_dashboard/
-│   ├── fetchers/
-│   ├── renderers/
-│   ├── config.py
-│   ├── fonts.py
-│   └── ...
-├── web/
-├── docs/
-├── dashboard_control.ps1
-├── dashboard_web.py
-├── dashboard_hotkeys.py
-├── render_dashboard.py
-├── send_dashboard.ps1
-├── setup_web_autostart.ps1
-├── epd_refresh_hidden.vbs
-├── dashboard_serial.ino
-└── EPDSerial.h
-```
-
-## 横版变体（dashboard_serial_landscape）
-
-同一套数据链路的 800x480 原生横版渲染变体，硬件横放使用，与竖版目录互不干扰：
-
-- 页1 今日看板（天气｜月历｜工作计划｜额度 四象限）、页2 三栏新闻、页3 行情
-- 页4 认知洞察：报纸式流式分栏（装满左栏后半节跨栏续排），正文字号随内容长度自适应（18/16/15/14）
-- 页5 个股走势：个股与人工智能(A)指数分时一行两列对比
-- 字体体系统一：黑标题带 20/700、正文 18/550、辅助小字 16
-- 内置 2026 年法定节假日/调休表 `HOLIDAY_PLAN`，月历「休/班」标记与 A 股交易日认定共用同一张表
-
-用法与竖版一致（`dashboard_control.ps1 refresh`、Web 控制台、全局热键），串口等环境变量相同。
-两个变体的输出/缓存落在各自目录，请勿同时向同一块屏幕推送。详见 `README_LANDSCAPE.md`。
 
 ## 快速开始
 
@@ -67,6 +47,8 @@ python -m pip install -r requirements.txt
 
 ### 2. 配置串口
 
+串口通过环境变量指定（驱动板为 CP210x 桥，USB 换口后可按 VID:PID 自动找回）：
+
 ```powershell
 $env:EPD_SERIAL_PORT = "<你的串口>"
 ```
@@ -74,77 +56,53 @@ $env:EPD_SERIAL_PORT = "<你的串口>"
 也可在运行命令中显式指定：
 
 ```powershell
-.\dashboard_serial\dashboard_control.ps1 refresh -PortName <你的串口>
-```
-
-如需长期保存：
-
-```powershell
-setx EPD_SERIAL_PORT "<你的串口>"
+.\dashboard_serial_landscape\dashboard_control.ps1 refresh -PortName <你的串口>
 ```
 
 ### 3. 启动 Web 控制台
 
 ```powershell
-python .\dashboard_serial\dashboard_web.py --port 8080
+python .\dashboard_serial_landscape\dashboard_web.py --port 8080
 ```
 
-访问：
-
-```text
-http://127.0.0.1:8080
-```
+访问 `http://127.0.0.1:8080`（手机/平板连同一 Wi-Fi 可远程控制）。修改 `web/index.html`
+或 `web/app.js` 后需重启生效（页面资源启动时读入内存）。
 
 ### 4. 推送到墨水屏
 
 ```powershell
-cd .\dashboard_serial
-.\dashboard_control.ps1 refresh
+.\dashboard_serial_landscape\dashboard_control.ps1 refresh
 ```
 
-### 5. 定时自动刷新（可选）
+计划任务每 20 分钟自动轮播（页1→页5 自然序）；热键 F13-F17 直切页面（M4/M5 强制全量更新）；`switch_orientation.py` 切换横竖运营。
 
-用 Windows 计划任务在工作时段每 20 分钟轮播刷新。启动动作请经由 `epd_refresh_hidden.vbs`：
-它以 SW_HIDE 在进程创建时就隐藏控制台；若直接跑 `powershell.exe -WindowStyle Hidden`，窗口是
-先创建再隐藏，每个刷新周期都会闪一次黑框打断操作。
+### 5. 邮件提醒（可选）
+
+QQ 邮箱网页版开启 IMAP/SMTP 服务并生成授权码（Gmail 在网页端设置自动转发到 QQ 邮箱即可接入同一链路）：
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "wscript.exe" `
-  -Argument ('"' + "$PWD\dashboard_serial\epd_refresh_hidden.vbs" + '"')
-$trigger = New-ScheduledTaskTrigger -Once -At "08:30" `
-  -RepetitionInterval (New-TimeSpan -Minutes 20) -RepetitionDuration (New-TimeSpan -Hours 10.5)
-Register-ScheduledTask -TaskName "EPD_Dashboard_Refresh" -Action $action -Trigger $trigger
+Copy-Item dashboard_serial_landscape\mail_config.example.json dashboard_serial_landscape\mail_config.json
+# 编辑 mail_config.json 填入 account 与 auth_code
+powershell -ExecutionPolicy Bypass -File ops\setup_mail_autostart.ps1
 ```
 
-刷新时段可按需调整（例如跳过午休，可拆成两段触发器）。
+守护进程开机自启并立即拉起，新邮件到达后秒级推屏弹窗；日志见运营目录 `mail_monitor.log`，
+弹窗时长/防刷屏参数在 `mail_config.json` 中调整。
 
-## 配置说明
-
-详细环境变量见 `docs/CONFIGURATION.md`。
-
-### 天气位置
+### 6. 回归验证
 
 ```powershell
-$env:EPD_WEATHER_LATITUDE = "<纬度>"
-$env:EPD_WEATHER_LONGITUDE = "<经度>"
-```
-
-### AI 功能
-
-页4和页5依赖智谱 GLM。未配置凭证时，相关模块会自动降级，不影响基础页面渲染。
-
-```powershell
-$env:GLM_KEY = "<访问凭证>"
-$env:GLM_ORG = "<组织标识>"
-$env:GLM_PROJ = "<项目标识>"
+python tools\render_all_pages.py landscape   # 离线渲染横版全部页面（排版调试/回归对比）
+python tests\test_gray_pack.py               # 四灰编码对拍厂商 C 实现
+python -m unittest discover tests            # 单元测试
 ```
 
 ## 安全说明
 
+- 所有凭据均通过环境变量或本地被忽略的配置文件读取（含 GLM 凭据与邮箱授权码）。
+- 运行日志、缓存、预览图、二进制输出和个人计划文件均不应提交。
+- HTTP 出口采用主机白名单 + 公网 IP 校验，降低 SSRF 风险。
 - Web 控制台无鉴权，仅限可信局域网使用。
-- 不要提交 `.env`、`plans.txt`、日志、缓存、预览图或生成的二进制文件。
-- HTTP 出口采用主机白名单，降低 SSRF 风险。
-- 所有访问凭证均通过环境变量或本地忽略文件读取。
 
 ## 许可证
 
