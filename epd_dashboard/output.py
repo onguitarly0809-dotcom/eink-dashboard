@@ -63,7 +63,7 @@ def _atomic_write(path, writer):
 
 def write_outputs(portrait, args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    # 页6横版天气用 _page6 后缀独立落盘，避免覆盖轮播正在推送的 dashboard.bin/preview
+    # 独立后缀落盘机制：需要与轮播主输出隔离的渲染用 output_suffix 指定
     suffix = getattr(args, "output_suffix", "")
     portrait_path = args.output_dir / f"dashboard{suffix}_portrait.png"
     preview_path = args.output_dir / f"dashboard{suffix}_preview.png"

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""竖版入口（480x800 竖屏渲染，页1-6，推送前旋转到固件 800x480 栅格）。
+"""竖版入口（480x800 竖屏渲染，页1-5，推送前旋转到固件 800x480 栅格）。
 
 实现已收归仓库根的共享包 epd_dashboard/；本文件只做变体引导：
 设置 EPD_VARIANT/EPD_BASE_DIR 并把仓库根挂上 sys.path。调用方式保持不变：
     python render_dashboard.py --mode full            # 全量抓数据 + 页1
-    python render_dashboard.py --mode weather --page 6
 """
 import os
 import sys

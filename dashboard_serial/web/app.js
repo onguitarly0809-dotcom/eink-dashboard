@@ -90,9 +90,8 @@ function doneFeedback(action) {
   if (['preview', 'preview_page4', 'page4', 'analysis'].includes(action)) { showPreview(); return action === 'analysis' ? 'insight' : 'maint'; }
   if (action === 'stock') { showPreview(); return 'insight'; }
   if (['page1', 'page2', 'page3', 'page5', 'refresh', 'plans'].includes(action)) { showPreview(); return 'maint'; }
-  if (action === 'preview_page6') { showImg('imgPage6', '/preview_page6.png'); return 'pages'; }
   if (action.startsWith('landscape_preview_')) { showImg('imgLandscape', '/preview_landscape.png'); return 'pages'; }
-  if (action === 'page6' || action.startsWith('landscape_push_')) return 'pages';
+  if (action.startsWith('landscape_push_')) return 'pages';
   if (action === 'switch_landscape') return 'pages';
   return null;
 }

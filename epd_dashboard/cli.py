@@ -2,7 +2,7 @@
 
 渲染器按当前变体（config.VARIANT，由入口脚本的 EPD_VARIANT 决定）从
 epd_dashboard.renderers.{landscape,portrait} 分派；页面集合：横版 1-5，
-竖版 1-6（页6 天气整页）。参数与输出 JSON 两版一致，便于脚本互通。
+横竖均为页1-5。参数与输出 JSON 两版一致，便于脚本互通。
 """
 import argparse
 import importlib
@@ -16,7 +16,6 @@ from epd_dashboard.config import (
     DEFAULT_OUTPUT_DIR,
     EPD_HEIGHT,
     EPD_WIDTH,
-    HAS_PAGE6,
     MAIL_BASE_PNG,
     MAIL_INBOX_FILE,
     MARKETS_TTL_CLOSED_MINUTES,
@@ -43,10 +42,10 @@ from epd_dashboard.obsidian_export import archive_insight
 from epd_dashboard.output import write_outputs
 from epd_dashboard.placeholders import placeholder_glm, placeholder_weather
 
-# 变体渲染器：页面函数从这里取，页面差异（签名/页6）都在各变体包内自洽
+# 变体渲染器：页面函数从这里取，页面差异（签名）在各变体包内自洽
 R = importlib.import_module(f"epd_dashboard.renderers.{VARIANT}")
 
-PAGES = ("1", "2", "3", "4", "5", "6") if HAS_PAGE6 else ("1", "2", "3", "4", "5")
+PAGES = ("1", "2", "3", "4", "5")
 
 
 def _render_base_page(now):
@@ -97,8 +96,7 @@ def main():
         "--page",
         choices=PAGES,
         default="1",
-        help="which page to render: 1=今日看板, 2=三栏新闻, 3=行情, 4=AI认知洞察, 5=智谱AI走势归因"
-             + (", 6=天气整页(竖版)" if HAS_PAGE6 else ""),
+        help="which page to render: 1=今日看板, 2=三栏新闻, 3=行情, 4=AI认知洞察, 5=智谱AI走势归因",
     )
     parser.add_argument(
         "--test-pattern",
@@ -188,11 +186,6 @@ def main():
         return
 
     page = int(args.page)
-    # 页6 天气整页（竖版专属）：渲染器直绘 EPD 800x480 栅格（无需按变体旋转），
-    # 输出带 _page6 后缀独立落盘，不覆盖轮播主输出
-    if page == 6:
-        args.output_suffix = "_page6"
-        args.orientation = "none"
     cache = load_cache()
     weather = cache.get("weather")
     glm = cache.get("glm")
@@ -293,14 +286,12 @@ def main():
         except Exception as exc:
             print(f"WARN plans read failed: {exc}", file=sys.stderr)
 
-    # 按页面确定必需模块：页1=天气/额度/计划，页2=新闻，页3/5=行情，页4=AI生成内容，页6=天气
+    # 按页面确定必需模块：页1=天气/额度/计划，页2=新闻，页3/5=行情，页4=AI生成内容
     data_map = {"weather": weather, "plans": plans, "news": news, "markets": markets}
     if page in (3, 5):
         required = ("markets",)
     elif page == 2:
         required = ("news",)
-    elif page == 6:
-        required = ("weather",)
     else:
         required = ("weather", "plans")
     missing_modules = [module for module in required if data_map[module] is None]
@@ -364,9 +355,7 @@ def main():
     cache["updated_at"] = now.isoformat(timespec="seconds")
     save_cache(cache)
 
-    if page == 6:
-        portrait = R.render_page6(weather, now)
-    elif page == 3:
+    if page == 3:
         portrait = R.render_page3(markets)
     elif page == 2:
         portrait = R.render_page2(news)

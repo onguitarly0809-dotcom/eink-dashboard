@@ -128,6 +128,9 @@ def render_plans(draw, panel_y, plans, now):
         bottom_limit = p2 + PANEL_HEIGHT - 44  # 给“还有 N 项”留位
     available_h = bottom_limit - top_limit
     n = len(visible_plans)
+    if n == 0:
+        draw.text((PANEL_X + 30, top_limit), "— 暂无计划 —", font=font(17), fill=0)
+        return
     text_h = SIZE_S
     cell_h = available_h / n
     for index, plan in enumerate(visible_plans, 1):

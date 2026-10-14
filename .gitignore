@@ -32,3 +32,6 @@ mail_monitor.lock
 mail_base.png
 # GLM credentials fallback file (any variant dir)
 glm_usage.conf
+
+# Offline full-page regression render output (tools/render_all_pages.py)
+_refactor_baseline/

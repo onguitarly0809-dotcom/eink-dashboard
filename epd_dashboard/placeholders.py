@@ -2,7 +2,7 @@
 
 
 def placeholder_weather(now):
-    # 页1只读实况子集；页6横版额外字段给安全缺省（hourly/days 故意缺省，渲染端画"待刷新"）
+    # 页1只读实况子集；扩展字段给安全缺省（hourly/days 故意缺省，渲染端画"待刷新"）
     return {
         "temperature": 0.0, "humidity": 0, "precipitation": 0, "wind": 0.0, "uv_index": 0.0,
         "description": "数据待更新", "high": 0.0, "low": 0.0, "updated": now.strftime("%H:%M"),

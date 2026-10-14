@@ -7,7 +7,7 @@
 
 横竖行为差异全部由 config.VARIANT 分支：
 - 横版：基础动作 + 切换竖版运营（switch_portrait）；
-- 竖版：基础动作 + 页6 天气整页 + 切换横版运营 + 横版六页预览/推送互看
+- 竖版：基础动作 + 切换横版运营 + 横版五页预览/推送互看
   （依赖兄弟目录 dashboard_serial_landscape 存在）。
 """
 import argparse
@@ -50,9 +50,8 @@ SWITCH_PY = REPO_ROOT / "switch_orientation.py"
 # 临时新闻任务（fetchers/news.py 的文件驱动机制）
 TEMP_TASK_FILE = BASE_DIR / "temp_news_task.json"
 
-# 竖版专属：页6 天气整页 + 横版兄弟目录互看
+# 竖版专属：横版兄弟目录互看
 IS_PORTRAIT = VARIANT == "portrait"
-PAGE6_PREVIEW = BASE_DIR / "dashboard_page6_preview.png"
 LANDSCAPE_DIR = REPO_ROOT / "dashboard_serial_landscape"
 LANDSCAPE_AVAILABLE = IS_PORTRAIT and (LANDSCAPE_DIR / "render_dashboard.py").exists()
 LANDSCAPE_RENDER = LANDSCAPE_DIR / "render_dashboard.py"
@@ -92,7 +91,6 @@ ACTION_LABEL = {
 
 if IS_PORTRAIT:
     ACTION_LABEL.update({
-        "page6": "推送页6·天气整页", "preview_page6": "预览页6·天气整页",
         "switch_landscape": "切换横版运营",
     })
     if LANDSCAPE_AVAILABLE:
@@ -104,8 +102,8 @@ else:
     ACTION_LABEL["switch_portrait"] = "切换竖版运营"
 
 # python 直连路由的动作（不走 dashboard_control.ps1）：
-# 页6 天气整页（竖版）+ 横版互看（竖版）+ 方向切换（两版各指对方）
-PY_ACTIONS = {"switch_portrait"} if not IS_PORTRAIT else {"switch_landscape", "page6", "preview_page6"}
+# 横版互看（竖版）+ 方向切换（两版各指对方）
+PY_ACTIONS = {"switch_portrait"} if not IS_PORTRAIT else {"switch_landscape"}
 if IS_PORTRAIT and LANDSCAPE_AVAILABLE:
     PY_ACTIONS |= {f"landscape_preview_{n}" for n in LANDSCAPE_MODES}
     PY_ACTIONS |= {f"landscape_push_{n}" for n in LANDSCAPE_MODES}
@@ -211,12 +209,6 @@ def _build_cmd(action, pattern, planstext, force):
         return ([sys.executable, str(SWITCH_PY), "portrait"], str(REPO_ROOT))
     if action == "switch_landscape":
         return ([sys.executable, str(SWITCH_PY), "landscape"], str(REPO_ROOT))
-    if action in ("page6", "preview_page6"):
-        cmd = [sys.executable, str(RENDER_PY), "--mode", "weather", "--page", "6"]
-        if action == "page6":
-            cmd.append("--push")
-            return _ps_mutex_wrap(cmd), str(BASE_DIR)
-        return cmd, str(BASE_DIR)
     if action.startswith("landscape_"):
         kind, _, num = action.rpartition("_")
         mode = LANDSCAPE_MODES.get(int(num))
@@ -581,8 +573,6 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif parsed.path == "/preview.png":
             self._serve_png(PREVIEW_PNG)
-        elif IS_PORTRAIT and parsed.path == "/preview_page6.png":
-            self._serve_png(PAGE6_PREVIEW)
         elif IS_PORTRAIT and parsed.path == "/preview_landscape.png":
             self._serve_png(LANDSCAPE_PREVIEW)
         else:

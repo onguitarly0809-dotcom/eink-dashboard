@@ -1,7 +1,7 @@
 """天气：open-meteo 实况/逐时/多日 + 中央气象台预警（仅北京）。
 
 页1只用实况子集（temperature/humidity/precipitation/wind/uv_index/description/high/low/updated），
-页6横版整页额外消费 feels/pressure/wind_degree/rain_mm/sunrise/sunset/moon/hourly/days。
+扩展字段 feels/pressure/wind_degree/rain_mm/sunrise/sunset/moon/hourly/days 按全量抓取。
 旧缓存缺新键时由渲染端 .get() 兜底，不在这里做版本迁移。
 """
 import json
@@ -95,7 +95,7 @@ def fetch_weather(now=None):
         "high": daily["temperature_2m_max"][0],
         "low": daily["temperature_2m_min"][0],
         "updated": datetime.fromisoformat(current["time"]).strftime("%H:%M"),
-        # 页6横版整页扩展
+        # 扩展字段（全量抓取，页面按需消费）
         "city": WEATHER_CITY,
         "code": code,
         "feels": current.get("apparent_temperature"),

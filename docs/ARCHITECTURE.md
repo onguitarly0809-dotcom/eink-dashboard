@@ -28,7 +28,7 @@ epd_dashboard/                    # 共享核心包（横竖唯一的 Python 实
 ├── layouts/                      #   横竖差异的版面常量与字数配额
 ├── fetchers/                     #   数据抓取与生成（天气/新闻/行情/额度/洞察/归因）
 ├── renderers/landscape/          #   横版 800x480 页面渲染器（页1-5 + 邮件弹窗层）
-├── renderers/portrait/           #   竖版 480x800 页面渲染器（页1-6）
+├── renderers/portrait/           #   竖版 480x800 页面渲染器（页1-5）
 ├── push.py                       #   串口推送（波特率自动协商 / 1-bit 与四灰双尺寸分流）
 ├── mail_monitor.py               #   IMAP IDLE 新邮件监控守护
 └── cli.py / web.py / hotkeys.py  #   CLI / Web / 热键三个入口的实现

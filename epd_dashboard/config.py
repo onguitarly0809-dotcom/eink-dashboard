@@ -74,7 +74,7 @@ ALLOWED_HTTP_HOSTS = {
 }
 
 # ---------- 数据源 URL ----------
-# 页6天气整页需要体感/气压/风向/逐时曲线/多日预报；页1只用其中实况子集，字段增补对页1无影响
+# 天气字段按全量抓取（体感/气压/风向/逐时/多日预报）；页1只用其中实况子集
 WEATHER_CITY = "北京"
 WEATHER_URL = (
     "https://api.open-meteo.com/v1/forecast?"

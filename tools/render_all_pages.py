@@ -10,8 +10,7 @@
     python tools/render_all_pages.py portrait   [输出目录]
 
 页面函数签名与 cli.py 的渲染分派完全一致；时间固定为 2026-09-23 12:00，
-保证同缓存输入下输出可复现。输出 <out>/pageN.png（竖版含 page6.png）
-与 test_pattern.png。
+保证同缓存输入下输出可复现。输出 <out>/pageN.png 与 test_pattern.png。
 """
 import importlib
 import os
@@ -40,9 +39,6 @@ def render_variant(variant: str, out_dir: Path):
     p4 = importlib.import_module(f"epd_dashboard.renderers.{variant}.page4_analysis")
     p5 = importlib.import_module(f"epd_dashboard.renderers.{variant}.page5_zhipu")
     tp = importlib.import_module(f"epd_dashboard.renderers.{variant}.test_pattern")
-    page6 = None
-    if variant == "portrait":
-        page6 = importlib.import_module("epd_dashboard.renderers.portrait.page6_weather")
 
     cache = load_cache()
     weather = cache.get("weather") or placeholder_weather(FIXED_NOW)
@@ -66,9 +62,6 @@ def render_variant(variant: str, out_dir: Path):
     for name, img in pages.items():
         img.save(out_dir / f"{name}.png")
         print(f"{out_dir / (name + '.png')}  {img.size}")
-    if page6 is not None:
-        page6.render_page6(weather, FIXED_NOW).save(out_dir / "page6.png")
-        print(f"{out_dir / 'page6.png'}")
     tp.render_test("info", FIXED_NOW).save(out_dir / "test_pattern.png")
     print(f"{out_dir / 'test_pattern.png'}")
 
