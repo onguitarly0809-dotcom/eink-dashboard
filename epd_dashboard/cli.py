@@ -18,6 +18,7 @@ from epd_dashboard.config import (
     EPD_WIDTH,
     MAIL_BASE_PNG,
     MAIL_INBOX_FILE,
+    MAIL_STATE_FILE,
     MARKETS_TTL_CLOSED_MINUTES,
     MARKETS_TTL_TRADING_MINUTES,
     PAGE_STATE_FILE,
@@ -163,7 +164,23 @@ def main():
             portrait = render_overlay(base, payload, now)
         else:
             if not MAIL_BASE_PNG.exists():
-                raise RuntimeError("mail_base.png 不存在（无弹窗在屏），无需收起")
+                # 幂等空操作：底图不存在=弹窗已收起（或从未上屏）。正常退出，
+                # 让手动收起（M5）与守护定时收起互不冲突，二次调用不重复刷屏
+                print("mailoff: 无弹窗在屏（底图不存在），本次为空操作", file=sys.stderr)
+                print(json.dumps({"mode": "mailoff", "noop": True}, ensure_ascii=False))
+                return
+            # 页状态已流转（排队期间轮播/手动切页接管过屏幕）则不还原，避免倒退
+            try:
+                overlay_page = json.loads(MAIL_STATE_FILE.read_text(encoding="utf-8")).get("overlay_page")
+                current_page = json.loads(PAGE_STATE_FILE.read_text(encoding="utf-8")).get("page")
+            except (OSError, ValueError, json.JSONDecodeError):
+                overlay_page = current_page = None
+            if overlay_page in (1, 2, 3, 4, 5) and current_page != overlay_page:
+                print(f"mailoff: 页状态已流转（{overlay_page}→{current_page}），弹窗已被接管，无需还原",
+                      file=sys.stderr)
+                print(json.dumps({"mode": "mailoff", "noop": True, "reason": "page-moved"},
+                                 ensure_ascii=False))
+                return
             from PIL import Image
             portrait = Image.open(MAIL_BASE_PNG).convert("L")
             if portrait.size != (EPD_WIDTH, EPD_HEIGHT):
@@ -182,6 +199,9 @@ def main():
             from epd_dashboard.push import push_with_retry
             push_with_retry(binary_path=binary_path, port=args.port, baud=args.baud, chunk=args.chunk)
             result["pushed"] = True
+            if args.mode == "mailoff":
+                # 推回成功即删底图：后续 mailoff（守护定时器/重复按键）自动变空操作
+                MAIL_BASE_PNG.unlink(missing_ok=True)
         print(json.dumps(result, ensure_ascii=False))
         return
 

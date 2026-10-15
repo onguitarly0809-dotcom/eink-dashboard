@@ -4,8 +4,20 @@
   "host": "imap.qq.com",
   "port": 993,
   "min_push_gap_seconds": 180,
-  "batch_window_seconds": 25,
+  "batch_window_seconds": 5,
   "max_pending_seconds": 300,
   "max_show": 3,
-  "overlay_seconds": 600
+  "overlay_seconds": 600,
+  "filters": {
+    "block_senders": [
+      "@edm.example.com",
+      "marketing@news.example.com"
+    ],
+    "block_subject_keywords": [
+      "(AD)",
+      "<广告>",
+      "退订"
+    ],
+    "block_from_keywords": []
+  }
 }

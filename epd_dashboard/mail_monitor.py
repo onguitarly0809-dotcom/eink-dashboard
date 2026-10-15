@@ -34,6 +34,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 
 from epd_dashboard.config import (
     BASE_DIR,
+    MAIL_BASE_PNG,
     MAIL_CONFIG_FILE,
     MAIL_INBOX_FILE,
     MAIL_LOG_FILE,
@@ -43,6 +44,9 @@ from epd_dashboard.config import (
 
 IDLE_MAX_SECONDS = 25 * 60   # RFC 2177：单次 IDLE 上限 29 分钟，25 分钟重发
 IDLE_WAKE_SECONDS = 20       # IDLE 等待中的 socket 唤醒粒度
+IDLE_KEEPALIVE_SECONDS = 240 # IDLE 会话保活：静默连接定期重开（QQ 对长 IDLE 会静默哑火）
+COMMAND_TIMEOUT_SECONDS = 120  # IMAP 命令阶段（SELECT/SEARCH/FETCH）的 socket 超时：
+                               # imaplib 默认无限阻塞，连接假死时守护会卡死无日志
 POLL_FALLBACK_SECONDS = 30   # 服务器不支持 IDLE 时的轮询周期
 FETCH_BATCH = 20             # 单周期最多取信头数（防长时间占连接，下周期继续）
 PUSH_WAIT_SECONDS = 160      # control.ps1 排队参数：覆盖一轮轮播 1.5~2.5 分钟
@@ -52,10 +56,16 @@ DEFAULT_CONFIG = {
     "host": "imap.qq.com",
     "port": 993,
     "min_push_gap_seconds": 180,   # 两次推屏最小间隔（防刷屏）
-    "batch_window_seconds": 25,    # 到件后等待合并窗口（收拢突发多封）
+    "batch_window_seconds": 5,     # 到件后等待合并窗口（收拢突发；单封为主的场景窗口越小延迟越低）
     "max_pending_seconds": 300,    # 持续滴灌下的最长积压（保证 5 分钟内必推）
     "max_show": 3,                 # 弹窗卡最多显示封数
     "overlay_seconds": 600,        # 弹窗停留时长（到点 mailoff 还原被覆盖页）
+    # 广告过滤（子串匹配、不区分大小写；命中任一规则即不推屏，水位照常推进）
+    "filters": {
+        "block_senders": [],       # 发件人显示名或地址；"@域名" 即域名后缀
+        "block_subject_keywords": [],
+        "block_from_keywords": [],
+    },
 }
 
 
@@ -145,7 +155,9 @@ class MailMonitor:
         """按 UID 水位补查新邮件（连接建立后/IDLE 事件后/断线重连后调用）。"""
         if self.imap is None:
             return
-        # IDLE 结束后重新 SELECT 刷新服务器端邮件视图，再按水位搜索
+        # IDLE 结束后重新 SELECT 刷新服务器端邮件视图，再按水位搜索。
+        # 命令阶段设 socket 超时：连接假死时命令超时上抛 → 重连补查，而非永久卡死
+        self.imap.socket().settimeout(COMMAND_TIMEOUT_SECONDS)
         status, _ = self.imap.select("INBOX")
         if status != "OK":
             raise RuntimeError("SELECT INBOX 失败")
@@ -162,17 +174,24 @@ class MailMonitor:
         uids = [u for u in uids if u > self.watermark][:FETCH_BATCH]
         now_str = time.strftime("%H:%M")
         got = 0
+        blocked = 0
         # FETCH 抛异常 = 传输层故障 → 直接上抛触发重连（水位未推进，重连后补查）；
         # 单封解析失败给占位记录，水位照常推进，不留永久卡位
         for uid in uids:
             status, data = self.imap.uid("FETCH", str(uid),
                                          "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
             record = self._parse_fetch(uid, status, data, now_str)
+            if self._is_blocked(record):
+                blocked += 1
+                self.log(f"已过滤 uid={uid}: {record['subject'][:36]} <{record['addr'][:40]}>")
+                continue
             self.pending.append(record)
             got += 1
         if uids:
             self.watermark = max(self.watermark, max(uids))
             self._save_state()
+        if blocked and not got:
+            self.log(f"本批 {blocked} 封全部命中过滤规则，不推屏")
         if got:
             self.last_arrival = time.time()
             if not self.first_pending:
@@ -189,11 +208,11 @@ class MailMonitor:
 
     def _parse_fetch(self, uid, status, data, now_str):
         if status != "OK" or not data or not isinstance(data[0], tuple):
-            return {"uid": uid, "from": "(无法解析)", "subject": "(无法解析)", "time": now_str}
+            return {"uid": uid, "from": "(无法解析)", "addr": "", "subject": "(无法解析)", "time": now_str}
         try:
             msg = message_from_bytes(data[0][1])
         except Exception:
-            return {"uid": uid, "from": "(无法解析)", "subject": "(无法解析)", "time": now_str}
+            return {"uid": uid, "from": "(无法解析)", "addr": "", "subject": "(无法解析)", "time": now_str}
         sender = self._decode(msg.get("From", ""))
         name, addr = parseaddr(sender)
         display = name or addr or "(未知发件人)"
@@ -203,7 +222,29 @@ class MailMonitor:
             arrive = parsedate_to_datetime(msg.get("Date")).astimezone().strftime("%H:%M")
         except (TypeError, ValueError):
             pass
-        return {"uid": uid, "from": display, "subject": subject, "time": arrive}
+        # addr 单独保留：过滤按"显示名+地址"联合匹配，只按显示名会误杀
+        # （如某银行营销号与账单号显示名相同、地址不同）
+        return {"uid": uid, "from": display, "addr": addr, "subject": subject, "time": arrive}
+
+    def _is_blocked(self, mail):
+        """广告过滤：mail_config.json 的 filters 配置（子串、不区分大小写）。
+
+        block_senders            发件人黑名单：匹配显示名或地址；"@域名" 形式即域名后缀
+        block_subject_keywords   主题关键词黑名单
+        block_from_keywords      发件人显示名关键词黑名单
+        命中任一规则即拦截（不推屏，但水位照常推进，不会重复检查）。
+        """
+        flt = self.cfg.get("filters") or {}
+        frm = f"{mail.get('from', '')} {mail.get('addr', '')}".lower()
+        subj = (mail.get("subject") or "").lower()
+        for rule in flt.get("block_senders", []):
+            if rule and rule.lower() in frm:
+                return True
+        if any(k.lower() in subj for k in flt.get("block_subject_keywords", []) if k):
+            return True
+        if any(k.lower() in frm for k in flt.get("block_from_keywords", []) if k):
+            return True
+        return False
 
     @staticmethod
     def _decode(value):
@@ -236,23 +277,45 @@ class MailMonitor:
                 break
 
     def wait_events(self, max_wait):
-        """等待新邮件事件，最长 max_wait 秒。返回 True=有事件/该查了。"""
+        """等待新邮件事件，最长 max_wait 秒。返回 True=有事件/该查了。
+
+        单次 IDLE 会话超过 IDLE_KEEPALIVE_SECONDS 仍无事件时主动重开
+        （DONE → 再 IDLE）：QQ 服务器对静默的长 IDLE 连接会停止推送事件，
+        定期重开保持服务端会话新鲜；返回前总等待时长仍受 max_wait 约束。
+        """
         if max_wait < 2:
             return True   # 推送时机已到：跳过 IDLE 往返，直接回主循环
         if self.polling:
             time.sleep(min(POLL_FALLBACK_SECONDS, max_wait))
             return True
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            hit = self._idle_session(deadline)
+            if hit:
+                return True
+            if time.time() >= deadline:
+                return False
+            # 无事件且会话到保活时限：重开 IDLE 会话（也顺带探测连接死活，
+            # 假死连接在重开握手处超时上抛 → 重连补查）
+            self.log("IDLE 会话保活重开")
+        return False
+
+    def _idle_session(self, outer_deadline):
+        """一个 IDLE 会话周期。返回 True=命中事件；False=到本会话上限未命中。"""
         tag = self._idle_begin()
         if tag is None:
             time.sleep(POLL_FALLBACK_SECONDS)
             return True
-        deadline = time.time() + max_wait
+        session_deadline = min(outer_deadline, time.time() + IDLE_KEEPALIVE_SECONDS)
         buf = b""
         sock = self.imap.socket()
         hit = False
         try:
-            while time.time() < deadline and not hit:
-                sock.settimeout(IDLE_WAKE_SECONDS)
+            while time.time() < session_deadline and not hit:
+                # 超时按剩余时间收窄：无事件时 recv 最多阻塞到 deadline 即醒，
+                # 否则会睡满 IDLE_WAKE_SECONDS（20s）把合并窗口/收起时限撑爆
+                remaining = session_deadline - time.time()
+                sock.settimeout(max(0.5, min(IDLE_WAKE_SECONDS, remaining)))
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
@@ -342,6 +405,14 @@ class MailMonitor:
     def maybe_dismiss(self):
         """到点收起弹窗：页状态未变才还原（变了说明轮播/手动已接管屏幕，不倒退）。"""
         if not self.overlay_until or time.time() < self.overlay_until:
+            return
+        if not MAIL_BASE_PNG.exists():
+            # 底图已被收起流程删除（M5 手动收起后 cli 会删底图）：屏已还原，
+            # 直接清状态即可，不再起 powershell、不再刷屏
+            self.log("弹窗已被手动收起（底图不存在），定时收起跳过")
+            self.overlay_until = 0.0
+            self.overlay_page = None
+            self._save_state()
             return
         current = self._read_page_state()
         if current != self.overlay_page:

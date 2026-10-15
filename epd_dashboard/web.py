@@ -28,6 +28,8 @@ from pathlib import Path
 from epd_dashboard.config import (
     BASE_DIR,
     INSIGHT_ARCHIVE_DIR,
+    MAIL_BASE_PNG,
+    MAIL_STATE_FILE,
     VARIANT,
 )
 
@@ -41,6 +43,23 @@ LOG_FILE = BASE_DIR / "web_console.log"
 WEB_DIR = BASE_DIR / "web"
 INDEX_HTML = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 APP_JS = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+
+def _mail_overlay_active():
+    """邮件弹窗是否正在屏上：守护写的还原状态未到期 + 底图存在 + 页状态未流转。
+
+    页状态已变说明轮播/手动切页早已接管屏幕（弹窗已不在屏），M5 应回落原功能。
+    """
+    try:
+        state = json.loads(MAIL_STATE_FILE.read_text(encoding="utf-8"))
+        if float(state.get("overlay_until") or 0) < time.time():
+            return False
+        if not MAIL_BASE_PNG.exists():
+            return False
+        page = json.loads(PAGE_STATE.read_text(encoding="utf-8")).get("page")
+        return state.get("overlay_page") in (1, 2, 3, 4, 5) and page == state.get("overlay_page")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
 
 # 渲染入口（本变体目录的薄引导脚本）
 RENDER_PY = BASE_DIR / "render_dashboard.py"
@@ -71,6 +90,7 @@ ACTION_CMD = {
     "analysis": "analysis",
     "page5": "page5",
     "stock": "stock",
+    "mailoff": "mailoff",  # M5 在邮件弹窗在屏时的替代动作：收起弹窗还原被覆盖页
     "clear": "clear",
     "preview": "preview",
     "preview_page4": "preview",
@@ -84,6 +104,7 @@ ACTION_LABEL = {
     "page1": "切到今日看板", "page2": "切到热点新闻", "page3": "切到行情",
     "page4": "切到认知洞察", "analysis": "重新生成认知洞察",
     "page5": "切到智谱AI", "stock": "重新生成智谱AI分析",
+    "mailoff": "收起邮件弹窗·还原页面",
     "clear": "清屏", "preview": "渲染预览",
     "preview_page4": "预览认知洞察",
     "test_info": "测试·信息卡", "test_chess": "测试·棋盘格", "test_black": "测试·全黑",
@@ -239,6 +260,11 @@ def run_action(action, pattern=None, planstext=None, force=False):
 
     force=True 透传 -Force：page1-5 跳过切页缓存 TTL，强制联网刷新数据。
     """
+    # M5（F17 → page5 强制刷新）按下时若邮件弹窗正在屏上：改为收起弹窗还原被覆盖页；
+    # 弹窗不在屏（或已被轮播接管）时 M5 保持原功能。用户看完邮件即可按键收起。
+    if action == "page5" and force and _mail_overlay_active():
+        action = "mailoff"
+        force = False
     with _state_lock:
         if _state["running"]:
             return False
