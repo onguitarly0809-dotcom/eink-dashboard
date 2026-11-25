@@ -2,9 +2,10 @@
 
 依赖 lunar_python（缺省时农历相关功能自动退化为空）。
 """
-from datetime import date, datetime, timedelta
+import sys
+from datetime import date, datetime, time as dtime, timedelta
 
-from epd_dashboard.config import HOLIDAY_PLAN
+from epd_dashboard.config import HOLIDAY_PLAN, HOLIDAY_PLAN_YEAR
 
 try:
     from lunar_python import Solar as _LunarSolar
@@ -37,10 +38,29 @@ def is_statutory_holiday(day):
     return False
 
 
+_plan_year_warned = False
+
+
+def holiday_mark(day):
+    """day 在 config.HOLIDAY_PLAN 里的标记（"休"/"班"）；表不覆盖该年份时返回 None。
+
+    表里只有(月, 日)，对应的是 HOLIDAY_PLAN_YEAR 那一年的安排。跨年后若继续按(月, 日)
+    查，会把上一年的调休日原样套到新年上，所以年份不符就当没有这张表。
+    """
+    if day.year != HOLIDAY_PLAN_YEAR:
+        global _plan_year_warned
+        if not _plan_year_warned:
+            _plan_year_warned = True
+            print(f"WARN HOLIDAY_PLAN 只覆盖 {HOLIDAY_PLAN_YEAR} 年，{day.year} 年按常规规则判断"
+                  "（周末 + 法定节假日），请更新 config.HOLIDAY_PLAN", file=sys.stderr)
+        return None
+    return HOLIDAY_PLAN.get((day.month, day.day))
+
+
 def is_trading_day(day):
     """A股是否交易日。config.HOLIDAY_PLAN 优先：休=放假（含调休连休日与周末）、
     班=周末调休上班日（照常开市）；表未覆盖的年份退回 周末/法定节假日 常规判断。"""
-    mark = HOLIDAY_PLAN.get((day.month, day.day))
+    mark = holiday_mark(day)
     if mark == "休":
         return False
     if mark == "班":
@@ -73,6 +93,21 @@ def market_of(code):
     return "A"
 
 
+def _nth_weekday(year, month, weekday, n):
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + (n - 1) * 7)
+
+
+def us_dst_active(now):
+    """now（北京时间）是否处于美国夏令时。规则（2007 年起）：3 月第二个周日 02:00 美东
+    开始、11 月第一个周日 02:00 美东结束，即北京时间 15:00 / 14:00。此前按"3~10 月"粗略
+    取整，3 月上旬与 11 月头一周各有一周差一小时（开收盘状态提前/推后一小时）。"""
+    start = datetime.combine(_nth_weekday(now.year, 3, 6, 2), dtime(15, 0))
+    end = datetime.combine(_nth_weekday(now.year, 11, 6, 1), dtime(14, 0))
+    return start <= now < end
+
+
 def market_status_for(market, now):
     """按市场各自时段返回交易状态：未开盘 / 交易中 / 午休 / 已收盘 / 休市。"""
     if market == "HK":
@@ -87,10 +122,8 @@ def market_status_for(market, now):
             return "午休"
         return "已收盘"
     if market == "US":
-        # 美股 9:30-16:00 美东，无午休。北京≈美东+12h(夏令时)/+13h(冬令时)，近似切换。
-        et = now - timedelta(hours=13)
-        if 3 <= now.month <= 10:  # 粗略夏令时窗口
-            et = now - timedelta(hours=12)
+        # 美股 9:30-16:00 美东，无午休。北京 = 美东 + 12h（夏令时）/ + 13h（冬令时）
+        et = now - timedelta(hours=12 if us_dst_active(now) else 13)
         if et.weekday() >= 5:
             return "休市"
         ehm = et.strftime("%H:%M")

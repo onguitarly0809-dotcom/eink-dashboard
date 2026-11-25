@@ -267,6 +267,27 @@ function fetchData(manual) {
     if (manual) showDot('data', false);
   }).catch(() => {});
 }
+// 某一栏的新闻列表。服务端给的是 {title, summary, pinned} 结构（<栏>_items）：缓存列表里
+// 存的是屏上用的精华行，原始标题要经 summaries 反查，置顶标记是"本栏第一条是否置顶"。
+// 此前写成拿精华行当键查 summaries、拿标题和布尔值比置顶，摘要和角标从未显示出来过。
+// <栏>_pinned 的语义是"本栏第一条是否置顶"，对旧载荷同样成立。
+// 没有 _items 的旧载荷（条目是显示行字符串）退回纯标题渲染；字段损坏时按空列表处理，
+// 不能让这一栏抛错拖垮整块数据看板。
+function newsListHtml(n, k) {
+  const items = Array.isArray(n[k + '_items']) ? n[k + '_items'] : (Array.isArray(n[k]) ? n[k] : []);
+  const badge = n[k + '_badge'] || '荐';
+  const firstPinned = !!n[k + '_pinned'];
+  return items.map((e, index) => {
+    const entry = (e && typeof e === 'object') ? e : {title: e};
+    const title = String(entry.title ?? '');
+    const summary = String(entry.summary || '');
+    const pin = !!entry.pinned || (index === 0 && firstPinned);
+    return `<div class="news-item${pin ? ' pin' : ''}">
+        <div class="t">${pin ? `<span class="badge">${esc(badge)}</span>` : ''}${esc(title)}</div>
+        ${summary ? `<div class="s">${esc(summary)}</div>` : ''}</div>`;
+  }).join('');
+}
+
 function renderData() {
   if (!DATA) return;
   const w = DATA.weather || {};
@@ -308,19 +329,9 @@ function renderData() {
     ['international', '🌍 国际', n.international_source],
     ['ai', '🤖 AI', n.ai_source],
   ];
-  $('dNews').innerHTML = colDefs.map(([k, label, src]) => {
-    const items = n[k] || [];
-    const pinned = n[k + '_pinned'];
-    const badge = n[k + '_badge'];
-    const list = items.map(t => {
-      const isPin = pinned && t === pinned;
-      const sum = (n.summaries || {})[t];
-      return `<div class="news-item${isPin ? ' pin' : ''}">
-        <div class="t">${isPin ? `<span class="badge">${esc(badge || '荐')}</span>` : ''}${esc(t)}</div>
-        ${sum ? `<div class="s">${esc(sum)}</div>` : ''}</div>`;
-    }).join('');
-    return `<div class="news-col"><h4>${label} <span class="src">${esc(src || '')}</span></h4>${list}</div>`;
-  }).join('');
+  $('dNews').innerHTML = colDefs.map(([k, label, src]) =>
+    `<div class="news-col"><h4>${label} <span class="src">${esc(src || '')}</span></h4>${newsListHtml(n, k)}</div>`
+  ).join('');
 
   const it = DATA.intraday || {};
   $('dIntraUpdated').textContent = it.updated ? '更新 ' + it.updated : '';

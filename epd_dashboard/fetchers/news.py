@@ -2,6 +2,7 @@
 import json
 import re
 import sys
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -12,7 +13,7 @@ from epd_dashboard.config import (
     NEWS_SUMMARY_ENABLED,
     NEWS_SUMMARY_RETAIN,
 )
-from epd_dashboard.httpclient import http_read
+from epd_dashboard.httpclient import STALL_RATIO, http_read
 
 # RSS 是不可信外部输入：标准库会展开内部 DTD 实体（"十亿笑话"可致资源耗尽），
 # 优先用 defusedxml 禁用 DTD；缺失时退回标准库并告警（安全加固静默失效不可接受）
@@ -23,6 +24,9 @@ except ImportError:
     print("WARNING: defusedxml not installed, RSS parsing falls back to stdlib (DTD not forbidden)", file=sys.stderr)
 
 NEWS_PER_BAND = 5
+# RSS 源请求超时（秒）：各源正常响应都在 2 秒内（Google 搜索式 feed 偶有 4 秒级），
+# 默认 15 秒只是让停摆的源每轮多等；超过 10 秒基本就是取不到了
+NEWS_RSS_TIMEOUT_S = 10
 CHINANEWS_ROLL_URL = "https://www.chinanews.com.cn/rss/scroll-news.xml"
 
 
@@ -89,7 +93,7 @@ def fetch_model_release(now=None):
     """半天内最新的大模型发布标题（纯标题，渲染层打角标）；无命中返回 None。"""
     now = now or datetime.now().astimezone()
     try:
-        root = _parse_xml(http_read(MODEL_RELEASE_URL))
+        root = _read_rss(MODEL_RELEASE_URL)
     except Exception as exc:
         print(f"WARN news[model_release] fetch failed: {exc}", file=sys.stderr)
         return None
@@ -154,7 +158,13 @@ def run_temp_task():
         return {"off": True}
     band = task.get("band", "domestic")
     badge = task.get("badge", "价")
-    match_re = re.compile(task["match"], re.IGNORECASE)
+    try:
+        match_re = re.compile(task["match"], re.IGNORECASE)
+    except (re.error, KeyError, TypeError) as exc:
+        # Web 界面保存时会校验正则，但任务文件可以被手工改坏。一个写坏的正则不该让
+        # 每一轮新闻刷新都在这里抛异常（整个新闻抓取随之失败），按"任务停用"处理
+        print(f"WARN temp task regex invalid, task ignored: {exc}", file=sys.stderr)
+        return {"off": True}
 
     def _title_ok(title):
         """官方售价命中判定：匹配型号名 + 真实价格数字，排除猜价/爆料类。"""
@@ -165,7 +175,7 @@ def run_temp_task():
         )
 
     try:
-        root = _parse_xml(http_read(_gnews_search(task["query"])))
+        root = _read_rss(_gnews_search(task["query"]))
     except Exception as exc:
         print(f"WARN news[temp_task] fetch failed: {exc}", file=sys.stderr)
         root = None
@@ -215,10 +225,17 @@ def _strip_column_prefix(title):
 
 
 def _clean_title(item):
-    """取条目标题；去 Google 来源后缀与媒体栏目标签前缀，只留正文。"""
+    """取条目标题；去 Google 的"- 来源名"后缀与媒体栏目标签前缀，只留正文。"""
     title = (item.findtext("title") or "").replace("\u200b", "").replace("\ufeff", "").strip()
-    if " - " in title:
-        title = title.split(" - ", 1)[0].strip()
+    source = item.findtext("source")
+    if source:
+        # 只有 Google 新闻 RSS 的条目带 <source>，标题形如"正文 - 来源名"。此前对一切标题
+        # 按首个 " - " 截断，中新网/垂直媒体里"A - B"式的正经标题被拦腰截掉后半句
+        suffix = f" - {source.strip()}"
+        if title.endswith(suffix):
+            title = title[:-len(suffix)].strip()
+        elif " - " in title:
+            title = title.rsplit(" - ", 1)[0].strip()   # 来源名对不上时仍按最后一节剥离
     # 粘着来源尾巴（"-国内频道""- 时局"）：剥短尾巴，剥空则保留原标题
     stripped = _GLUED_SUFFIX_RE.sub("", title).strip()
     return _strip_column_prefix(stripped or title)
@@ -231,6 +248,15 @@ def _parse_xml(payload):
     return ET.fromstring(payload)
 
 
+def _read_rss(url):
+    """RSS 源读取：短超时 + 按主机熔断。
+
+    news.google.com 在本机网络下时通时断（2026-11 实测不可达时每次都等到超时）：
+    默认的 15 秒×2 次重试让一轮新闻刷新白等 90 余秒。这里超时降到 NEWS_RSS_TIMEOUT_S，
+    并交给 net_breaker 按主机熔断——连续停摆后在冷却期内直接抛 CircuitOpen。"""
+    return _parse_xml(http_read(url, timeout=NEWS_RSS_TIMEOUT_S, breaker=True))
+
+
 # 栏目新闻时效窗（小时）：查询侧 when:1d 为主防护，本地按 pubDate 复核兜底（两层，
 # 同新模型置顶通道）。无 pubDate 的条目无法确认新鲜度，宁缺毋滥一并丢弃。
 NEWS_MAX_AGE_HOURS = 36
@@ -239,7 +265,7 @@ NEWS_MAX_AGE_HOURS = 36
 def _fresh_items(url):
     """产出通过时效过滤的 (item, 标题)：无发布时间或超窗条目丢弃（见 NEWS_MAX_AGE_HOURS）。"""
     now = datetime.now().astimezone()
-    root = _parse_xml(http_read(url))
+    root = _read_rss(url)
     for item in root.findall(".//item"):
         title = _clean_title(item)
         if not title:
@@ -291,7 +317,7 @@ def _fetch_annotated_titles(url):
     Google News 搜索结果默认按相关度排序，会混入数周前的旧文；
     配合查询里的 when:Nd 时间过滤，标注让模型能进一步识别新旧冲突时以新为准。
     """
-    root = _parse_xml(http_read(url))
+    root = _read_rss(url)
     now = datetime.now().astimezone()
     titles = []
     for item in root.findall(".//item"):
@@ -395,18 +421,25 @@ def fetch_news(previous=None, summarize=False):
         best_titles, best_content, used = [], {}, ""
         best_rank = (-1, -1)
         # 两轮取源，满额（NEWS_PER_BAND 条）即停；不足额时第二轮只重试因异常
-        # 失败的源（成功过的滚动流分钟级不变，重抓无意义）。Google 搜索式 feed
+        # 失败的源（成功过的滚动流分钟级不变，重抓无意义；等到超时才断的也不重试，
+        # 重试只会再等一个完整超时）。Google 搜索式 feed
         # 常间歇性 SSL 中断，一次失败落到中新网后混合流按关键词分栏又常分不满
         # 国际栏，补一轮重试可救回多数情况；仍不足则取条数最多的源。
+        stalled = set()
         for attempt in range(2):
             for source_name, url in sources:
                 # 同一 URL 只下载一次；缓存过的仍要走本栏的处理（国内+国际共用中新网
                 # 滚动，混合流按栏分栏各取所需——跳过处理会让后到的栏永远拿不到它）
+                if url in stalled:
+                    continue
                 if url not in fetched:
+                    began = time.monotonic()
                     try:
                         fetched[url] = _fetch_entries(url, source_name)
                     except Exception as exc:
                         print(f"WARN news[{key}] {source_name} try{attempt + 1} failed: {exc}", file=sys.stderr)
+                        if time.monotonic() - began >= NEWS_RSS_TIMEOUT_S * STALL_RATIO:
+                            stalled.add(url)
                         continue
                 pool = fetched[url]
                 # 中新网滚动是混合流，按关键词分栏；Google/量子位/雷锋网等已定向的源直接用

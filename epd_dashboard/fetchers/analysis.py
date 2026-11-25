@@ -6,15 +6,34 @@ import urllib.error
 from datetime import datetime, time as dtime, timedelta
 
 from epd_dashboard.calendar_cn import is_trading_day
-from epd_dashboard.config import ANALYSIS_TTL_MINUTES
+from epd_dashboard.config import (
+    ANALYSIS_REASONING_EFFORT,
+    ANALYSIS_THINKING,
+    ANALYSIS_TTL_MINUTES,
+)
 from epd_dashboard.httpclient import http_read
+
+VALID_REASONING_EFFORTS = ("low", "high", "max")   # glm-5.3 系列接口只认这三个，其余取值报错
+
+
+def _reasoning_params(model):
+    """随请求发送的思考参数（按模型区分）。
+
+    glm-5* 系列：按 ANALYSIS_THINKING 开/关思考，开着时强度取 ANALYSIS_REASONING_EFFORT
+    （2026-11-25 用户选定 glm-5.3-flash + low）。不带这些参数时接口按默认的 max 强度思考，
+    同一个任务慢 5~10 倍。
+    其他模型（如兜底的 glm-4-flash）不支持 reasoning_effort，什么都不带。
+    """
+    if not str(model).startswith("glm-5"):
+        return {}
+    if ANALYSIS_THINKING == "disabled":
+        return {"thinking": {"type": "disabled"}}
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": ANALYSIS_REASONING_EFFORT}
 
 
 def _request_chat(key, model, payload_base, url, timeout=60):
     """以指定模型向 url 请求一次补全，返回 (报告文本, 完整响应)。"""
-    payload = dict(payload_base, model=model, max_tokens=2048)
-    if str(model).startswith("glm-5"):
-        payload["thinking"] = {"type": "disabled"}
+    payload = dict(payload_base, model=model, max_tokens=2048, **_reasoning_params(model))
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     for attempt in (1, 2):

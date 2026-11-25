@@ -129,19 +129,31 @@ MAIL_INBOX_FILE = BASE_DIR / "mail_inbox.json"    # 监控 → 渲染器的数�
 MAIL_STATE_FILE = BASE_DIR / "mail_state.json"    # UID 水位 + 弹窗还原状态（重启续期）
 MAIL_LOG_FILE = BASE_DIR / "mail_monitor.log"
 MAIL_BASE_PNG = BASE_DIR / "mail_base.png"        # 弹窗底图（被覆盖页的还原基准）
+PAUSE_BASE_PNG = BASE_DIR / "pause_base.png"      # 锁屏暂停覆盖层底图（解锁还原基准）
+PAUSE_STATE_FILE = BASE_DIR / "pause_state.json"   # 暂停时的页状态（resume 防倒退守卫）
 PAGE_STATE_FILE = BASE_DIR / "page_state.json"    # 与 ops/control.ps1 共用的页状态
 
 # ---------- 页4认知洞察 / 页5智谱AI分析（智谱 GLM，凭据复用 GLM_KEY） ----------
 # 2026-08 实测：标准接口 paas/v4 只认余额/资源包——仅 glm-4-flash 免费可调，glm-4.5/5.x 全报 1113；
-# Coding Plan 套餐额度走专用接口 coding/paas/v4（同一个 Key），glm-5.3 实测可用
-# （thinking 推理模型，代码中对 glm-5* 关闭思考换取生成速度）。
-# 主通道 = ANALYSIS_API_URL + ANALYSIS_MODEL；报 1113 时自动回退：标准接口 + glm-4-flash（免费兜底）
+# Coding Plan 套餐额度走专用接口 coding/paas/v4（同一个 Key）。
+# 2026-11-25 复测：编码接口上 glm-5.3 / glm-5.3-flash / glm-5.2 可用；glm-4-flash 在两个接口上
+# 都返回 1309（提示"套餐已到期"）——下面这条兜底目前走不通。
+# 主通道 = ANALYSIS_API_URL + ANALYSIS_MODEL + ANALYSIS_REASONING_EFFORT。2026-11-25 用户选定
+# glm-5.3-flash + 思考强度 low（试用观察质量；实测页5 同款报告 3.7s，glm-5.3 关闭思考 5.2s）。
+# 思考参数只发给 glm-5* 系列（见 fetchers/analysis._reasoning_params）：强度只认 low/high/max，
+# 其余取值接口报错；high/max 慢 5~10 倍，报告类任务里思考还可能把 max_tokens 全部用光。
 GLM_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 GLM_CODING_CHAT_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
 ANALYSIS_API_URL = GLM_CODING_CHAT_URL
-ANALYSIS_MODEL = "glm-5.3"
-ANALYSIS_MODEL_FALLBACK = "glm-4-flash"
-ANALYSIS_TTL_MINUTES = 90      # 分析缓存时效：超过才允许自动重新生成
+ANALYSIS_MODEL = "glm-5.3-flash"
+# 思考方式："enabled" = 按 ANALYSIS_REASONING_EFFORT 的强度思考；"disabled" = 关闭思考。
+# 试用想换回原来的组合：ANALYSIS_MODEL = "glm-5.3"、ANALYSIS_THINKING = "disabled"
+ANALYSIS_THINKING = "enabled"
+ANALYSIS_REASONING_EFFORT = "low"
+ANALYSIS_MODEL_FALLBACK = "glm-4-flash"   # 报 1113 时回退标准接口用；2026-11-25 起实测返回 1309
+# 分析缓存时效：页5 报告超过这个时长即在标题带标"（历史）"。重写时机不再由它决定——
+# 港股时段内每次渲染页5 都重新生成（2026-11-25 用户选定方案 E）
+ANALYSIS_TTL_MINUTES = 90
 ANALYSIS_WEB_SEARCH = False    # True 时请求附带 web_search 联网工具（仅标准接口支持，且需账户余额）
 ANALYSIS_NEWS_PER_SECTOR = 6   # 每个板块喂给模型的新闻标题条数（Google News 搜索）
 ANALYSIS_NEWS_MAX_AGE_DAYS = 2 # 新闻时间窗（天）：查询加 when:Nd 过滤，归因"今日涨跌"只需最近1-2天消息
@@ -161,6 +173,9 @@ NEWS_SUMMARY_ENABLED = True      # 总开关（False 时三栏回到纯标题流
 NEWS_SUMMARY_BODY_CHARS = 2000  # 送模型的正文截断长度（新闻前载，导语+首段已含核心事实）
 NEWS_SUMMARY_TIMEOUT_S = 15     # 单篇 GLM 调用超时（秒）
 NEWS_SUMMARY_BUDGET_S = 70      # 单栏摘要整体时间预算（秒），超时剩余条目下轮再做
+NEWS_SUMMARY_WORKERS = 4        # 新标题摘要的并发数：逐篇串行时 16 篇约 60 秒，是 full 的第二大耗时。
+                                # 2026-11-25 实测该接口 8 路并发、5 秒 16 次均不限流；429 只在两个渲染
+                                # 进程叠加时出现过（互斥锁保证正常不会），且 _request_chat 已有退避重试
 NEWS_SUMMARY_RETAIN = 40       # 出栏条目的摘要保留条数：标题暂时滑出 5 条序列又回来时
                                # 直接复用缓存不重调模型（源在中新网/Google间摆动时常见）
 DATA_CACHE_FILE = BASE_DIR / "dashboard_data.json"
@@ -176,6 +191,15 @@ TTL_MINUTES = {
 }
 MARKETS_TTL_TRADING_MINUTES = 3
 MARKETS_TTL_CLOSED_MINUTES = 60
+
+# ---------- 上游源熔断（net_breaker.py，状态落盘、跨轮次生效） ----------
+# 连续停摆的源在冷却期内直接跳过，不再每轮重试到超时。2026-11 实测 Google News 在
+# 本机网络下每次请求都等到超时：一轮新闻刷新 93 秒耗在超时上，占整轮 full 的 47%。
+# 失败须在 FAIL_WINDOW 内连续累计到 FAIL_THRESHOLD 才打开（偶发一两次不触发）；
+# 冷却到期放行一次探测，探测再失败立即重新打开
+BREAKER_FAIL_THRESHOLD = 3
+BREAKER_FAIL_WINDOW_S = 30 * 60
+BREAKER_COOLDOWN_S = 30 * 60
 
 # ---------- 页1 月历：法定节假日/调休安排表 ----------
 # 按《国务院办公厅关于2026年部分节假日安排的通知》整理；官方口径如有出入，改这张表即可。
@@ -198,3 +222,7 @@ HOLIDAY_PLAN = {
     (10, 5): "休", (10, 6): "休", (10, 7): "休",                      # 国庆
     (10, 10): "班",                                                   # 国庆调休上班
 }
+# 上面这张表对应哪一年（表里只有月日）。跨年后 calendar_cn.holiday_mark 不再查它，改按
+# "周末 + 法定节假日"常规规则判断，并打一次 WARN 提醒换表——此前会把上一年的调休日
+# 原样套到新年上（2027-02-15 那一周被当成春节休市），静默出错
+HOLIDAY_PLAN_YEAR = 2026

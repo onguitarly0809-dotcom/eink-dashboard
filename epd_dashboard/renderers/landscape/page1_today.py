@@ -17,8 +17,8 @@ from datetime import date, timedelta
 
 from PIL import Image, ImageDraw
 
-from epd_dashboard.calendar_cn import lunar_extra
-from epd_dashboard.config import EPD_HEIGHT, EPD_WIDTH, HOLIDAY_PLAN
+from epd_dashboard.calendar_cn import holiday_mark, lunar_extra
+from epd_dashboard.config import EPD_HEIGHT, EPD_WIDTH
 from epd_dashboard.fetchers.weather import describe
 from epd_dashboard.fonts import FONT_STRONG, noto
 from epd_dashboard.placeholders import placeholder_glm
@@ -216,7 +216,8 @@ def _calendar_quad(draw, box, now):
         r, c = divmod(offset + day - 1, 7)
         cx = grid_x0 + col_w * (c + 0.5)
         cy = grid_top + row_h * (r + 0.5)
-        mark = HOLIDAY_PLAN.get((cell.month, cell.day))
+        # 休/班标记只对 HOLIDAY_PLAN 覆盖的那一年有效（跨年后不把旧安排套到新日期上）
+        mark = holiday_mark(cell)
         is_today = cell == now.date()
         if is_today:
             # 今日：黑底反白数字，正方形选中块（2026-10-08 用户要求，原 31x23 长方形），
@@ -246,8 +247,8 @@ def _plans_quad(draw, box, plans):
         draw.text(((x0 + x1) / 2, (top + y1) / 2), "— 暂无计划 —",
                   font=noto(16, 400), fill=0, anchor="mm")
         return
-    visible = plans[:3]
-    foot_reserve = y1 - 14 if len(plans) > 3 else y1 - 8
+    visible = plans[:4]
+    foot_reserve = y1 - 14 if len(plans) > 4 else y1 - 8
     slot_h = (foot_reserve - top) / len(visible)
     for gap_index in range(1, len(visible)):
         divider_y = top + gap_index * slot_h
@@ -265,8 +266,8 @@ def _plans_quad(draw, box, plans):
             cursor += draw.textlength(match.group(1), font=noto(18, FONT_STRONG)) + 12
         draw.text((cursor, first_y), truncate_text(draw, title, noto(18, BODY_TEXT_WEIGHT), x1 - 12 - cursor),
                   font=noto(18, BODY_TEXT_WEIGHT), fill=0)  # 550→450：与报告页正文同档
-    if len(plans) > 3:
-        draw.text(((x0 + x1) / 2, y1 - 13), f"— 还有 {len(plans) - 3} 项 —",
+    if len(plans) > 4:
+        draw.text(((x0 + x1) / 2, y1 - 13), f"— 还有 {len(plans) - 4} 项 —",
                   font=noto(16, 400), fill=0, anchor="mm")
 
 

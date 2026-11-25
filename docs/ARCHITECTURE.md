@@ -47,7 +47,18 @@ tests/ tools/                     # 单元测试 / 离线全页渲染回归工�
 |---|---|---|
 | Windows 计划任务 | 定时轮播 | vbs 无闪窗启动 → 变体目录 control 委托 → ops/control.ps1 |
 | Web 控制台 / 全局热键 | 手动 | 薄入口 → epd_dashboard/web.py / hotkeys.py |
-| 邮件监控守护 | IMAP IDLE 新邮件事件 | mail_monitor.py → control mail 弹窗层（10 分钟后 mailoff 还原被覆盖页） |
+| 邮件监控守护 | IMAP IDLE 新邮件事件 | mail_monitor.py → control mail 弹窗层（按配置时长，默认 10 分钟后 mailoff 还原被覆盖页） |
+
+## 容错与请求校验
+
+- **退出码**：`ops/control.ps1` 0 成功 / 1 失败或让位 / 3 会话锁定 / 4 设备未连接。cli 在 `--push` 前只枚举串口做在线预检，设备不在就以 4 结束（不抓数、不耗模型额度）；邮件监控把 3、4 都当作"稍后重试"。
+- **轮播连败**：refresh 失败不翻页（下一轮重试同一页），同一页连续失败 2 次后跳过它一圈；连败记录与页状态同存 `page_state.json`（`fail_page` / `fail_count`）。
+- **上游熔断**：`epd_dashboard/net_breaker.py` 按数据源熔断，连续失败 3 次打开 30 分钟，冷却到期放行探测。
+- **生成失败不冻结轮播**：页4 洞察生成失败沿用上一篇并标"历史"；页5 分析被内容安全拦截时去掉新闻标题重试一次，仍失败沿用旧值并标"历史"。
+- **页5 报告**：港股时段内每次渲染本页都重新生成；小节超字数重试三次仍超时，把超限的那一节在标点处截短来用，而不是整篇丢弃。
+- **邮件监控**：锁屏/设备离线时推送与收起按 20/30 秒推迟等待；IMAP UIDVALIDITY 变化自动重建水位基准；竖版运营时不启动。
+- **Web 控制台**：所有请求校验 Host（只认 IP / localhost / *.local），POST 另要求 Origin 同源且 Content-Type 为 application/json；用自定义域名访问时设环境变量 `EPD_WEB_ALLOW_ANY_HOST=1`。
+- **节假日表**：`HOLIDAY_PLAN` 只对 `HOLIDAY_PLAN_YEAR` 那一年有效，跨年后按常规规则判断并打 WARN。
 
 ## 缓存策略
 

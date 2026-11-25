@@ -5,7 +5,8 @@ from epd_dashboard.renderers.landscape.page3_markets import render_page3
 from epd_dashboard.renderers.landscape.page4_analysis import render_page4
 from epd_dashboard.renderers.landscape.page5_zhipu import render_page5
 from epd_dashboard.renderers.landscape.page_mail import render_mail_overlay
+from epd_dashboard.renderers.landscape.pause_overlay import render_pause_overlay
 from epd_dashboard.renderers.landscape.test_pattern import render_test
 
 __all__ = ["render_dashboard", "render_page2", "render_page3", "render_page4",
-           "render_page5", "render_mail_overlay", "render_test"]
+           "render_page5", "render_mail_overlay", "render_pause_overlay", "render_test"]

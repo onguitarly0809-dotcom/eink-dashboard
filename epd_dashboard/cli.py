@@ -7,6 +7,7 @@ epd_dashboard.renderers.{landscape,portrait} 分派；页面集合：横版 1-5�
 import argparse
 import importlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -15,10 +16,13 @@ from epd_dashboard.config import (
     DEFAULT_ORIENTATION,
     DEFAULT_OUTPUT_DIR,
     EPD_HEIGHT,
+    EPD_SERIAL_PORT,
     EPD_WIDTH,
     MAIL_BASE_PNG,
     MAIL_INBOX_FILE,
     MAIL_STATE_FILE,
+    PAUSE_BASE_PNG,
+    PAUSE_STATE_FILE,
     MARKETS_TTL_CLOSED_MINUTES,
     MARKETS_TTL_TRADING_MINUTES,
     PAGE_STATE_FILE,
@@ -47,6 +51,23 @@ from epd_dashboard.placeholders import placeholder_glm, placeholder_weather
 R = importlib.import_module(f"epd_dashboard.renderers.{VARIANT}")
 
 PAGES = ("1", "2", "3", "4", "5")
+
+# 与 ops/control.ps1 约定：设备未连接时以 4 退出，调度方按"本轮跳过"处理（不算渲染失败）
+DEVICE_OFFLINE_EXIT = 4
+
+
+def _device_online(args):
+    """--push 前的设备在线预检：只枚举串口，不开端口、不碰固件。"""
+    if os.environ.get("EPD_FORCE_OFFLINE"):   # 自动化测试钩子：不必真拔 USB
+        print("device offline (forced by EPD_FORCE_OFFLINE)", file=sys.stderr)
+        return False
+    from epd_dashboard.push import DeviceUnavailable, _resolve_port
+    try:
+        _resolve_port(args.port or EPD_SERIAL_PORT, lambda message: print(message, file=sys.stderr))
+        return True
+    except DeviceUnavailable as exc:
+        print(f"device offline: {exc}", file=sys.stderr)
+        return False
 
 
 def _render_base_page(now):
@@ -87,11 +108,12 @@ def main():
     parser = argparse.ArgumentParser(description="Render the 7.5-inch e-paper dashboard")
     parser.add_argument(
         "--mode",
-        choices=("full", "today", "weather", "plans", "news", "markets", "insight", "psychology", "analysis", "stock", "mail", "mailoff"),
+        choices=("full", "today", "weather", "plans", "news", "markets", "insight", "psychology", "analysis", "stock", "mail", "mailoff", "pause", "resume"),
         default="full",
         help="which module to refresh: full=all, today=page1 only (weather/glm, TTL-gated), "
              "weather, plans, news, markets, insight, analysis, stock; mail=新邮件弹窗层"
-             "（当前页底图+弹窗，读 mail_inbox.json，全程不联网）; mailoff=推回底图像素级还原",
+             "（当前页底图+弹窗，读 mail_inbox.json，全程不联网）; mailoff=推回底图像素级还原; "
+             "pause=锁屏暂停大弹窗（监控的锁屏监视线程触发）; resume=解锁还原锁屏前画面",
     )
     parser.add_argument(
         "--page",
@@ -130,6 +152,13 @@ def main():
     )
     args = parser.parse_args()
 
+    # 设备在线预检（只在要推送时做）：设备拔掉时抓数/生成一轮要几十秒到几分钟，还白白
+    # 消耗 GLM 额度、往 Obsidian 写笔记，最后一步才发现推不了。不在线直接以 4 结束
+    if args.push and not _device_online(args):
+        print(json.dumps({"mode": args.test_pattern or args.mode, "page": args.page,
+                          "skipped": "device-offline"}, ensure_ascii=False))
+        sys.exit(DEVICE_OFFLINE_EXIT)
+
     now = datetime.now()
 
     if args.test_pattern:
@@ -144,11 +173,54 @@ def main():
         }, ensure_ascii=False))
         return
 
-    if args.mode in ("mail", "mailoff"):
-        # 邮件提醒弹窗层（手机二级菜单式覆盖）：mail=底图(当前页)+弹窗 上屏并把底图
-        # 存为还原基准；mailoff=把底图原样推回（像素级还原被覆盖页）。全程不联网、
-        # 不读写轮播缓存、不参与 TTL 门控。--page 对这两个模式无意义。
-        if args.mode == "mail":
+    if args.mode in ("mail", "mailoff", "pause", "resume"):
+        # 覆盖层四模式：mail/mailoff=邮件弹窗上屏/像素级还原（底图 mail_base.png）；
+        # pause/resume=锁屏暂停大弹窗/解锁还原（底图 pause_base.png，另一份互不干扰）。
+        # 全程不联网、不读写轮播缓存、不写页状态。--page 对这些模式无意义。
+        if args.mode == "pause":
+            base = _render_base_page(now)
+            tmp = PAUSE_BASE_PNG.with_suffix(".png.tmp")
+            base.save(tmp, format="PNG")
+            tmp.replace(PAUSE_BASE_PNG)
+            # 记录暂停时的页状态：resume 前若轮播已推进（页状态变化）则不还原防倒退
+            page = 1
+            try:
+                page = int(json.loads(PAGE_STATE_FILE.read_text(encoding="utf-8")).get("page", 1))
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+            Path(str(PAUSE_STATE_FILE)).write_text(json.dumps({"page": page}), encoding="utf-8")
+            render_pause = getattr(R, "render_pause_overlay", None)
+            if render_pause is None:
+                raise RuntimeError("锁屏暂停层暂仅横版支持（当前变体无对应渲染器）")
+            portrait = render_pause(base, now)
+        elif args.mode == "resume":
+            if not PAUSE_BASE_PNG.exists():
+                print("resume: 无暂停层在屏（底图不存在），本次为空操作", file=sys.stderr)
+                print(json.dumps({"mode": "resume", "noop": True}, ensure_ascii=False))
+                return
+            # 防倒退守卫：恢复排队期间轮播已推进（页状态变化）则不还原旧页——
+            # 屏幕 已被新内容接管，直接清理暂停态
+            try:
+                paused_page = int(json.loads(PAUSE_STATE_FILE.read_text(encoding="utf-8"))["page"])
+                current_page = int(json.loads(PAGE_STATE_FILE.read_text(encoding="utf-8")).get("page", 1))
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                paused_page = current_page = None
+            # 状态文件缺失（旧版暂停/异常路径）或页状态已流转：一律不还原——
+            # 无法证明"底图仍是被覆盖画面"时宁可不动屏，交给轮播自然接管
+            if paused_page is None or current_page != paused_page:
+                print(f"resume: 页状态已流转（{paused_page}→{current_page}），屏幕已被接管，跳过还原",
+                      file=sys.stderr)
+                PAUSE_BASE_PNG.unlink(missing_ok=True)
+                PAUSE_STATE_FILE.unlink(missing_ok=True)
+                print(json.dumps({"mode": "resume", "noop": True, "reason": "page-moved"},
+                                 ensure_ascii=False))
+                return
+            from PIL import Image
+            portrait = Image.open(PAUSE_BASE_PNG).convert("L")
+            if portrait.size != (EPD_WIDTH, EPD_HEIGHT):
+                raise RuntimeError(f"pause_base.png 尺寸异常 {portrait.size}，拒绝还原")
+            print("resume: 以保存的底图像素级还原锁屏前画面", file=sys.stderr)
+        elif args.mode == "mail":
             base = _render_base_page(now)
             tmp = MAIL_BASE_PNG.with_suffix(".png.tmp")
             base.save(tmp, format="PNG")
@@ -202,6 +274,10 @@ def main():
             if args.mode == "mailoff":
                 # 推回成功即删底图：后续 mailoff（守护定时器/重复按键）自动变空操作
                 MAIL_BASE_PNG.unlink(missing_ok=True)
+            elif args.mode == "resume":
+                # 同理：恢复成功即删暂停底图与状态，重复 resume 变空操作
+                PAUSE_BASE_PNG.unlink(missing_ok=True)
+                PAUSE_STATE_FILE.unlink(missing_ok=True)
         print(json.dumps(result, ensure_ascii=False))
         return
 
@@ -220,8 +296,16 @@ def main():
     # 切页 mode（today/news/markets）受 TTL 门控：缓存未过期直接用，按键秒出图。
     # full（定时轮播，数据补给线）与手动单模块命令（weather 等）不受限，始终联网；
     # --force 再额外跳过切页 TTL。
+    # 例外（2026-11-25）：full 渲染的不是页1、且天气缓存仍在 TTL 内时也不重抓——天气
+    # 只有页1 用，轮播 20 分钟一轮而 TTL 30 分钟，省下的这一轮照样覆盖随后的按键切页；
+    # 页1 自身上屏时照常抓最新（open-meteo 单次 1~20 秒，是每轮的固定开销）
     if args.mode in ("full", "weather", "today"):
-        if args.mode == "today" and not args.force and is_fresh(cache, "weather", TTL_MINUTES["weather"], now):
+        weather_reusable = (
+            not args.force
+            and (args.mode == "today" or (args.mode == "full" and page != 1))
+            and is_fresh(cache, "weather", TTL_MINUTES["weather"], now)
+        )
+        if weather_reusable:
             print("weather fresh, skip fetch", file=sys.stderr)
         else:
             try:
@@ -350,24 +434,37 @@ def main():
                 print(f"insight archived -> {archived}", file=sys.stderr)
             print("insight refreshed", file=sys.stderr)
         except Exception as exc:
-            print(f"ERROR insight generation failed: {exc}", file=sys.stderr)
-            raise RuntimeError("页4新主题生成失败，已取消渲染/推送以避免重复显示") from exc
-
-    # 页5 智谱AI 分析：手动 stock 模式强制重生成；轮播到页5且缓存超 TTL 时仅在港股时段内重生成
-    if args.mode == "stock" or (args.mode in ("full", "markets") and page == 5):
-        # --force 且目标是页5 = 热键 M5/手动 page5 -Force：强制重生成并绕过交易时段
-        # 门控（自动轮播仍按 TTL+时段省额度；显式按键是用户要"现在就要新内容"）
-        force = args.mode == "stock" or (args.force and page == 5)
-        if should_refresh(stock_analysis, force=force):
-            if force or in_generation_window(now, end_time=HK_SESSION_END):
-                try:
-                    stock_analysis = fetch_zhipu_analysis(markets, stock_analysis, now=now)
-                    cache["stock_analysis"] = stock_analysis
-                    print("stock analysis refreshed", file=sys.stderr)
-                except Exception as exc:
-                    print(f"WARN stock analysis generation failed, keep last value: {exc}", file=sys.stderr)
+            # 生成失败不再取消渲染：那样页状态不会提交，下一轮仍指向页4，接口持续故障时
+            # 整个轮播就冻在页4。改为沿用上一篇洞察并标"历史"（标题带显示"（历史）"），
+            # 轮播照常流转；一篇缓存都没有时页面显示占位
+            print(f"WARN insight generation failed, keep last insight: {exc}", file=sys.stderr)
+            if isinstance(analysis, dict) and analysis.get("text"):
+                analysis = dict(analysis, stale=True)
             else:
-                print("stock analysis: 非交易时段，跳过自动生成", file=sys.stderr)
+                analysis = None
+            cache["analysis"] = analysis
+
+    # 页5 智谱AI 分析：港股时段内每次渲染本页都重新生成（2026-11-25 用户选定方案 E：不再按
+    # 90 分钟 TTL 省额度，报告与同时刷新的分时图保持同一时刻）；时段外行情不动，自动轮播
+    # 不重写，只把超过 TTL 的旧报告标"历史"。手动 stock / page5 -Force 不受时段限制。
+    if args.mode == "stock" or (args.mode in ("full", "markets") and page == 5):
+        # --force 且目标是页5 = 热键 M5/手动 page5 -Force：显式按键是用户要"现在就要新内容"
+        force = args.mode == "stock" or (args.force and page == 5)
+        in_session = in_generation_window(now, end_time=HK_SESSION_END)
+        if force or in_session:
+            try:
+                stock_analysis = fetch_zhipu_analysis(markets, stock_analysis, now=now)
+                cache["stock_analysis"] = stock_analysis
+                print("stock analysis refreshed", file=sys.stderr)
+            except Exception as exc:
+                print(f"WARN stock analysis generation failed, keep last value: {exc}", file=sys.stderr)
+                # 重写失败而沿用旧报告：标"历史"。旁边是刚刷新的分时图，不标的话正文会对着
+                # 一张更新的图却毫无提示（旧报告不足 90 分钟时原先是不标的）
+                if isinstance(stock_analysis, dict) and stock_analysis.get("text"):
+                    stock_analysis = dict(stock_analysis, stale=True)
+                    cache["stock_analysis"] = stock_analysis
+        elif should_refresh(stock_analysis):
+            print("stock analysis: 非交易时段，跳过自动生成", file=sys.stderr)
         if isinstance(stock_analysis, dict) and stock_analysis.get("text") and should_refresh(stock_analysis):
             stock_analysis = dict(stock_analysis, stale=True)
             cache["stock_analysis"] = stock_analysis

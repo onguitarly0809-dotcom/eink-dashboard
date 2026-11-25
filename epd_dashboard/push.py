@@ -186,6 +186,10 @@ def push_with_retry(retries=3, retry_delay=2.0, **kwargs):
     """带重试的推送；全部失败抛最后一次的 PushError。
 
     DeviceUnavailable（端口不存在/被占用）是确定性失败：重试不会改变结果，立即向上抛。
+
+    重试间隔不需要大于固件的接收超时（dashboard_serial.ino 的 Serial.setTimeout(5000)）：
+    打开串口时 DTR/RTS 翻转会让 ESP8266 复位，固件重启后回到命令态并打印 EPD READY
+    （2026-11-25 真机抓串口输出确认），上一轮传输失败残留的"收数据"状态不复存在。
     """
     last_exc = None
     for attempt in range(1, retries + 1):

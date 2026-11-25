@@ -4,6 +4,8 @@
 RSS 自带正文（雷锋网）。出口边界与 SSRF 整改姿态一致：
 - 文章页仅限固定域名白名单：scheme+域名前置校验，解析 IP 必须公网，重定向逐跳同校验；
 - 逐篇独立调用 GLM：一篇被内容安全拦截（1301）只损失一篇，回退原标题展示；
+- 新标题的摘要按 NEWS_SUMMARY_WORKERS 并发执行（每批开始前检查时间预算），
+  结果仍按标题顺序回填，单篇失败的处理与串行时一致；
 - 摘要结果按标题缓存在 news["summaries"]，新标题才调模型；确定性失败负缓存
   （缓存值=原标题）防止 1301 重试风暴；网络类暂时失败不缓存，下轮再试；
 - 交互切页走 allow_new=False 纯缓存换装，不联网、不等 GLM。
@@ -16,6 +18,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
 from epd_dashboard.config import (
@@ -25,6 +28,7 @@ from epd_dashboard.config import (
     NEWS_SUMMARY_BUDGET_S,
     NEWS_SUMMARY_LINE_CHARS,
     NEWS_SUMMARY_TIMEOUT_S,
+    NEWS_SUMMARY_WORKERS,
 )
 
 # 允许抓文章页的域名（均已登记在 ALLOWED_HTTP_HOSTS；Google 跳转的任意媒体不在此列）
@@ -215,6 +219,10 @@ def _summarize_one(title, payload, key):
     return _smart_cut(line)
 
 
+class _BudgetExhausted(Exception):
+    """时间预算已用尽：这篇摘要没有发起调用。与"调用失败"区分开——不缓存、不告警。"""
+
+
 def apply_summaries(titles, content_map, cache, allow_new=True):
     """给栏目标题换装摘要行（三栏通用）。
 
@@ -234,6 +242,7 @@ def apply_summaries(titles, content_map, cache, allow_new=True):
     key, _org, _proj = _credentials()
     deadline = time.monotonic() + NEWS_SUMMARY_BUDGET_S
     fresh = 0
+    todo = []
     for title in titles:
         if title in cache:
             continue  # 之前摘过（含负缓存）：直接用缓存，不重复调模型
@@ -241,16 +250,31 @@ def apply_summaries(titles, content_map, cache, allow_new=True):
         if not (key and payload and payload[1]):
             cache[title] = title  # 无凭据/无正文载荷（源是裸标题源）：显示原标题，不再重试
             continue
-        if time.monotonic() > deadline:
-            break  # 预算尽：剩余条目本轮展示原标题（未缓存），下轮继续
-        try:
-            line = _summarize_one(title, payload, key)
-            fresh += 1  # 实际发生了一次模型调用（无论成败）
-        except Exception as exc:  # 网络类暂时失败：跳过这篇继续（单篇超时不连坐全栏），
-            # 不缓存，下轮重试；总时长由预算守卫兜底
-            print(f"WARN summary transient ({type(exc).__name__}), keep title", file=sys.stderr)
-            continue
-        cache[title] = line if line else title  # 确定性失败负缓存为原标题
+        todo.append((title, payload))
+    # 新标题摘要并发执行：逐篇串行时 16 篇约 60 秒，是 full 刷新的第二大耗时。
+    # 全部按标题顺序提交给线程池（先提交的先开工，单篇慢只占住一个线程）；每篇开工时
+    # 再查一次预算，到点后的条目不发起——与串行时"预算尽即停"的语义一致
+    if todo:
+        workers = max(1, min(NEWS_SUMMARY_WORKERS, len(todo)))
+
+        def summarize_when_started(title, payload):
+            if time.monotonic() > deadline:
+                raise _BudgetExhausted
+            return _summarize_one(title, payload, key)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(summarize_when_started, title, payload) for title, payload in todo]
+            for (title, _payload), future in zip(todo, futures):
+                try:
+                    line = future.result()
+                except _BudgetExhausted:
+                    continue  # 预算尽：本轮展示原标题（未缓存），下轮继续
+                except Exception as exc:  # 网络类暂时失败：跳过这篇继续（单篇超时不连坐全栏），
+                    # 不缓存，下轮重试；总时长由预算守卫兜底
+                    print(f"WARN summary transient ({type(exc).__name__}), keep title", file=sys.stderr)
+                    continue
+                fresh += 1  # 实际发生了一次模型调用（无论成败）
+                cache[title] = line if line else title  # 确定性失败负缓存为原标题
     lines = [cache.get(title) or title for title in titles]
     summarized = sum(1 for t in titles if cache.get(t) not in (None, t))
     return lines, cache, summarized, len(titles), fresh

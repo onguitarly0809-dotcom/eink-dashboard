@@ -2,9 +2,11 @@
 import json
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 
+from epd_dashboard import net_breaker
 from epd_dashboard.calendar_cn import market_of
 from epd_dashboard.config import (
     MARKET_COMPANY_SYMBOLS,
@@ -16,13 +18,13 @@ from epd_dashboard.config import (
 from epd_dashboard.httpclient import http_read
 from epd_dashboard.util import to_float
 
-# 尝试导入akshare，如果不可用会在运行时处理
-try:
-    import akshare as ak
-    AKSHARE_AVAILABLE = True
-except ImportError:
-    AKSHARE_AVAILABLE = False
-    print("WARNING: akshare not available, will use fallback data source", file=sys.stderr)
+# akshare 按需导入（_load_akshare）：模块导入约 2.3 秒（带起 pandas 等），而它只有抓
+# 板块时才用得上——页1/2/4、邮件弹窗、锁屏层、按键切页都不必付这笔启动税
+_akshare = None
+# 东方财富概念板块接口的熔断 key（net_breaker）：停摆时每轮白等十几秒才回退腾讯
+AKSHARE_BREAKER_KEY = "akshare:eastmoney"
+# 板块列表调用的硬超时：akshare 内部请求不带 timeout，连接假死会把整轮刷新挂死
+AKSHARE_LIST_TIMEOUT_S = 12.0
 
 
 # 东财概念板块列表里混有"统计类板块"——按条件筛出的股票集合而非真实主题，
@@ -44,6 +46,10 @@ def _is_statistical_board(name):
 def fetch_markets(previous=None):
     """抓取行情：腾讯（指数/公司/板块），失败保留旧值。"""
     markets = dict(previous) if isinstance(previous, dict) else {}
+    # 早期版本往缓存写过 markets.sectors（{hot, fall} 简表），后来改由渲染器从 raw_sectors
+    # 现算，这个键再没人更新却一直被原样带下去——Web 控制台曾读到这份不知哪天的旧数据。
+    # 板块数据只认 raw_sectors；遇到残留就丢掉
+    markets.pop("sectors", None)
     tencent_symbols = [code for group in MARKET_GROUPS.values() for code, _ in group["symbols"]]
     tencent_symbols += [code for code, _ in MARKET_COMPANY_SYMBOLS]
     tencent_data = {}
@@ -67,12 +73,18 @@ def fetch_markets(previous=None):
         # 尝试使用akshare获取板块和多股数据
         sectors_with_stocks = fetch_sector_with_akshare()
         if sectors_with_stocks and len(sectors_with_stocks) > 0:
+            net_breaker.success(AKSHARE_BREAKER_KEY)
             markets["raw_sectors"] = sectors_with_stocks
             print("Successfully loaded sector data from akshare with multiple stocks")
         else:
             raise Exception("akshare returned empty data")
     except Exception as ak_exc:
-        print(f"WARN akshare fetch failed: {ak_exc}, falling back to Tencent API", file=sys.stderr)
+        if isinstance(ak_exc, net_breaker.CircuitOpen):
+            # 熔断跳过不算新失败：冷却到期后自动放行探测
+            print(f"WARN akshare skipped ({ak_exc}), falling back to Tencent API", file=sys.stderr)
+        else:
+            net_breaker.failure(AKSHARE_BREAKER_KEY)
+            print(f"WARN akshare fetch failed: {ak_exc}, falling back to Tencent API", file=sys.stderr)
         # 回退到腾讯财经API（原有逻辑）
         try:
             payload = json.loads(http_read(
@@ -142,22 +154,69 @@ def fetch_markets(previous=None):
     return markets
 
 
+def _load_akshare():
+    """按需导入 akshare，返回模块；不可用返回 None（调用方走腾讯兜底）。"""
+    global _akshare
+    if _akshare is None:
+        try:
+            import akshare as akshare_module
+        except ImportError:
+            print("WARNING: akshare not available, will use fallback data source", file=sys.stderr)
+        else:
+            _akshare = akshare_module
+    return _akshare
+
+
+def _call_with_timeout(func, timeout, *args, **kwargs):
+    """给无超时参数的 akshare 调用加硬超时；超时抛 TimeoutError。
+
+    akshare 内部的 requests 不带 timeout，连接假死会把整轮刷新挂死。调用放到守护
+    线程里执行，到点即放弃：守护线程不阻塞解释器退出（渲染进程随后就结束）。"""
+    if timeout <= 0:
+        raise TimeoutError("akshare time budget exhausted")
+    box = {}
+
+    def runner():
+        try:
+            box["result"] = func(*args, **kwargs)
+        except Exception as exc:
+            box["error"] = exc  # 带回调用线程重新抛出
+
+    worker = threading.Thread(target=runner, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"akshare call timed out after {timeout:.0f}s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def fetch_sector_with_akshare():
     """使用akshare获取概念板块和多股数据。
 
     akshare 单次请求无法传超时，这里用整体时间预算兜底：超预算后剩余板块
     不再逐个取成分股（保留已取到的部分），避免网络差时把整个刷新流程挂死。
+    每次调用另有硬超时（_call_with_timeout）；接口停摆时按 AKSHARE_BREAKER_KEY
+    熔断，冷却期内直接抛 CircuitOpen，由调用方走腾讯兜底。
     """
-    if not AKSHARE_AVAILABLE:
+    akshare = _load_akshare()
+    if akshare is None:
         raise Exception("akshare not available")
+    if not net_breaker.allow(AKSHARE_BREAKER_KEY):
+        raise net_breaker.CircuitOpen(f"{AKSHARE_BREAKER_KEY} 近期连续失败")
 
     budget_seconds = 45.0
     start = time.monotonic()
 
+    def budget_left():
+        return budget_seconds - (time.monotonic() - start)
+
     try:
         print("Fetching concept boards from akshare...")
         # 获取概念板块列表
-        concept_boards = ak.stock_board_concept_name_em()
+        concept_boards = _call_with_timeout(akshare.stock_board_concept_name_em,
+                                            AKSHARE_LIST_TIMEOUT_S)
 
         if concept_boards is None or len(concept_boards) == 0:
             raise Exception("No concept boards returned from akshare")
@@ -179,15 +238,17 @@ def fetch_sector_with_akshare():
         for idx, (_, board) in enumerate(hot_boards.iterrows()):
             board_name = board['板块名称']
             print(f"Fetching stocks for hot board {idx+1}/3: {board_name}")
-            over_budget = time.monotonic() - start > budget_seconds
-            sectors_with_stocks.append(_board_payload(board, board_name, descending=True, skip_stocks=over_budget))
+            left = budget_left()
+            sectors_with_stocks.append(_board_payload(akshare, board, board_name, descending=True,
+                                                      skip_stocks=left <= 0, timeout=left))
 
         # 处理最冷板块
         for idx, (_, board) in enumerate(cold_boards.iterrows()):
             board_name = board['板块名称']
             print(f"Fetching stocks for cold board {idx+1}/3: {board_name}")
-            over_budget = time.monotonic() - start > budget_seconds
-            sectors_with_stocks.append(_board_payload(board, board_name, descending=False, skip_stocks=over_budget))
+            left = budget_left()
+            sectors_with_stocks.append(_board_payload(akshare, board, board_name, descending=False,
+                                                      skip_stocks=left <= 0, timeout=left))
 
         print(f"Successfully fetched {len(sectors_with_stocks)} sectors with stocks")
         return sectors_with_stocks
@@ -197,13 +258,14 @@ def fetch_sector_with_akshare():
         raise Exception(f"akshare error: {e}")
 
 
-def _board_payload(board, board_name, descending, skip_stocks=False):
+def _board_payload(akshare, board, board_name, descending, skip_stocks=False, timeout=0.0):
     """单个板块的载荷：名称、涨跌幅、领涨/领跌前2个股（个股获取失败则留空）。"""
     if skip_stocks:
         print("  Budget exceeded, skipping stock fetch")
         return {'name': board_name, 'pct': board['涨跌幅'], 'stocks': []}
     try:
-        stocks = ak.stock_board_concept_cons_em(symbol=board_name)
+        stocks = _call_with_timeout(akshare.stock_board_concept_cons_em, timeout,
+                                    symbol=board_name)
         if stocks is not None and len(stocks) > 0:
             top_stocks = stocks.sort_values('涨跌幅', ascending=not descending).head(2)
             payload = {

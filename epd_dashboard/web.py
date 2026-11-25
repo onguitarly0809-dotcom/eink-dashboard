@@ -11,6 +11,7 @@
   （依赖兄弟目录 dashboard_serial_landscape 存在）。
 """
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -255,6 +256,15 @@ def _build_cmd(action, pattern, planstext, force):
     return cmd, str(BASE_DIR)
 
 
+# 子进程不继承本进程的版式设定：各入口脚本用 setdefault 给 EPD_VARIANT/EPD_BASE_DIR 取
+# 默认值，继承下来会让竖版控制台里的"横版预览/推送"由横版入口脚本按竖版渲染
+_VARIANT_ENV_KEYS = ("EPD_VARIANT", "EPD_BASE_DIR")
+
+
+def _child_env():
+    return {key: value for key, value in os.environ.items() if key not in _VARIANT_ENV_KEYS}
+
+
 def run_action(action, pattern=None, planstext=None, force=False):
     """后台执行动作；同一时间只允许一个。
 
@@ -290,7 +300,7 @@ def run_action(action, pattern=None, planstext=None, force=False):
         skipped = False
         try:
             proc = subprocess.Popen(
-                cmd, cwd=cwd, stdout=subprocess.PIPE,
+                cmd, cwd=cwd, env=_child_env(), stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True,
                 encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -404,20 +414,74 @@ def overview_payload():
     }
 
 
+def _to_float(value):
+    """行情数值多为字符串（'2.47'、'2.47%'、'--'），统一成 float；无效返回 None。"""
+    try:
+        return float(str(value).replace("%", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _sector_hotspots(markets, count=3):
+    """板块热点：从 raw_sectors 按涨跌幅取涨幅前 count、跌幅前 count（与页3 渲染器同口径）。
+
+    缓存里有个早期版本留下的 markets.sectors 字段，后来抓取端只写 raw_sectors，它成了
+    永不更新的化石——Web 之前读的正是它，显示的是不知道哪天的涨跌。
+    """
+    rows = []
+    for item in (markets or {}).get("raw_sectors") or []:
+        if not isinstance(item, dict):
+            continue
+        pct = _to_float(item.get("zdf"))
+        if pct is not None:
+            rows.append({"name": str(item.get("name") or ""), "pct": pct})
+    rows.sort(key=lambda row: row["pct"], reverse=True)
+    return {"hot": rows[:count], "fall": list(reversed(rows[-count:])) if len(rows) >= count else []}
+
+
+def _news_entries(news, key):
+    """某一栏新闻的结构化列表：[{title, summary, pinned}]。
+
+    缓存里的栏列表已经是屏上显示行（有摘要的条目被 ≤22 字精华行替换），原始标题只存在
+    于 summaries（原始标题 → 精华行）；<栏>_pinned 是布尔值"本栏第一条是否置顶"。
+    此前 Web 拿显示行当键查 summaries、拿标题和布尔值比置顶，两者永远对不上。
+    """
+    summaries = news.get("summaries") if isinstance(news.get("summaries"), dict) else {}
+    title_of_line = {}
+    for title, line in summaries.items():
+        title_of_line.setdefault(line, title)
+    lines = news.get(key)
+    pinned_first = bool(news.get(f"{key}_pinned"))
+    entries = []
+    for index, line in enumerate(lines if isinstance(lines, list) else []):
+        line = str(line)
+        title = title_of_line.get(line)
+        entries.append({
+            "title": title or line,
+            "summary": line if title else "",
+            "pinned": pinned_first and index == 0,
+        })
+    return entries
+
+
 def data_payload():
     data = _read_cache()
     weather = dict(data.get("weather") or {})
     hourly = weather.get("hourly") or {}
     if hourly:  # 36 点只取前 24，Web 一天的走势足够
         weather["hourly"] = {k: (v[:24] if isinstance(v, list) else v) for k, v in hourly.items()}
-    news = data.get("news") or {}
-    news = {k: news.get(k) for k in (
+    cached_news = data.get("news") if isinstance(data.get("news"), dict) else {}
+    news = {k: cached_news.get(k) for k in (
         "updated", "domestic", "international", "ai", "stale",
         "domestic_source", "international_source", "ai_source",
         "domestic_pinned", "international_pinned", "ai_pinned",
         "domestic_badge", "international_badge", "ai_badge", "summaries")}
-    markets = data.get("markets") or {}
-    markets = {k: markets.get(k) for k in ("companies", "quotes", "sectors", "updated", "stale")}
+    # 结构化新闻列表（原始标题 + 摘要 + 置顶标记）；上面的显示行字符串保留给旧版页面脚本
+    for key in ("domestic", "international", "ai"):
+        news[f"{key}_items"] = _news_entries(cached_news, key)
+    cached_markets = data.get("markets") if isinstance(data.get("markets"), dict) else {}
+    markets = {k: cached_markets.get(k) for k in ("companies", "quotes", "updated", "stale")}
+    markets["sectors"] = _sector_hotspots(cached_markets)
     return {
         "weather": weather,
         "news": news,
@@ -517,6 +581,57 @@ def insight_archive_read(name):
         return None, f"读取失败：{exc}"
 
 
+# ---------- 请求来源校验（2026-11-25 审计：监听局域网却不校验请求来源）----------
+# 任何同网段的网页都能让访客的浏览器向这里发 POST（CSRF）。三道闸：
+# 1. Host 必须是 IP 字面量 / localhost / *.local / 不带点的计算机名——DNS 重绑定能把
+#    攻击者域名解析到本机局域网 IP、再借"同源"读走接口数据，域名型 Host 一律拒绝；
+# 2. 带 Origin 的请求必须与 Host 同源（浏览器对跨站 POST 一定带 Origin，"null" 也不放过）；
+# 3. POST 必须是 application/json——HTML 表单发不出这个类型，挡住不带 Origin 的请求。
+# 本机热键服务（http.client 直连 127.0.0.1、JSON 体、无 Origin）三道闸全过。
+
+
+def _host_allowed(host_header):
+    """Host 头是否可信：IP 字面量 / localhost / *.local / 不带点的计算机名。"""
+    if os.environ.get("EPD_WEB_ALLOW_ANY_HOST"):     # 用自定义域名或 hosts 映射访问时的放行开关
+        return True
+    hostname = (host_header or "").strip().lower()
+    if hostname.startswith("[") and "]" in hostname:
+        hostname = hostname[1:hostname.index("]")]     # IPv6 字面量 [::1]:8080
+    elif ":" in hostname:
+        hostname = hostname.rsplit(":", 1)[0]          # 去端口
+    if not hostname:
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    return hostname == "localhost" or hostname.endswith(".local") or "." not in hostname
+
+
+def _same_origin(origin, host_header):
+    """Origin 与请求的 Host 同主机同端口（协议不限：经 https 反向代理访问时也算同源）。"""
+    try:
+        parsed = urllib.parse.urlsplit(origin or "")
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    return parsed.netloc.lower() == (host_header or "").strip().lower()
+
+
+def _post_rejection(headers):
+    """POST 的来源校验：返回拒绝原因，None = 放行。"""
+    origin = headers.get("Origin")
+    if origin is not None and not _same_origin(origin, headers.get("Host")):
+        return "跨站请求被拒绝（Origin 与访问地址不一致）"
+    if (headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+        return "跨站请求被拒绝（Sec-Fetch-Site: cross-site）"
+    if (headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+        return "请求被拒绝（只接受 application/json）"
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "EPDWeb/1.0"
 
@@ -534,6 +649,33 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                          "application/json; charset=utf-8", code)
 
+    def _drain_body(self):
+        """回复前把请求体读掉。接收缓冲里留着未读数据时关闭连接，Windows 发的是 RST 而不是
+        正常挥手，客户端可能读不到刚发出的 403（实测偶发连接中止）。有长度上限和超时，
+        恶意大包/慢速发包不会把处理线程拖住。"""
+        try:
+            remaining = min(int(self.headers.get("Content-Length", 0) or 0), 1 << 20)
+            self.connection.settimeout(5)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            pass
+
+    def _reject_untrusted(self, check_post=False):
+        """Host 校验（所有请求）+ POST 来源校验。返回 True 表示已回复拒绝响应。"""
+        host_ok = _host_allowed(self.headers.get("Host"))
+        reason = _post_rejection(self.headers) if (check_post and host_ok) else None
+        if host_ok and not reason:
+            return False
+        if check_post:
+            self._drain_body()
+        message = reason or "拒绝访问：请用 IP 地址（或 localhost / *.local）打开控制台"
+        self._send_json({"ok": False, "message": message}, 403)
+        return True
+
     def _read_json(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length <= 0:
@@ -544,6 +686,8 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        if self._reject_untrusted():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             html = INDEX_HTML.replace("{{PORT}}", str(self.server.server_port))
@@ -623,6 +767,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def do_POST(self):
+        if self._reject_untrusted(check_post=True):
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/action":
             data = self._read_json()

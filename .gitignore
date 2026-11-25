@@ -35,3 +35,12 @@ glm_usage.conf
 
 # Offline full-page regression render output (tools/render_all_pages.py)
 _refactor_baseline/
+
+# Runtime files written by the dashboard itself (any variant dir):
+# ad-hoc news task, upstream circuit-breaker state (epd_dashboard/net_breaker.py)
+dashboard_serial*/temp_news_task.json
+dashboard_serial*/net_breaker.json
+# Lock-screen pause layer: base image (pixel copy of the screen) and its state file
+dashboard_serial*/pause_base.png
+dashboard_serial*/pause_state.json
+dashboard_serial*/pause_state.json.tmp

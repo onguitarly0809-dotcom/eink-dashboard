@@ -12,7 +12,10 @@ from PIL import Image, ImageDraw
 from epd_dashboard.config import EPD_HEIGHT, EPD_WIDTH
 from epd_dashboard.fonts import FONT_STRONG, noto
 from epd_dashboard.renderers.landscape.common import (
+    draw_tabler,
     dither_rect,
+    tabler_font,
+    tabler_glyph,
     truncate_text,
     wrap_text,
 )
@@ -26,16 +29,18 @@ MAX_SHOWN = 3
 SHADOW_OFFSET = 6     # 投影偏移（右下）
 
 
-def _draw_envelope(draw, cx, cy, size, fill=255):
-    """手绘信封线稿：随项目分发的 Tabler 子集不含邮件图标，这里按同款 2px
-    线稿风格自绘（矩形 + 折线封口），黑标题带内白色。"""
-    half = size / 2
-    x0, x1 = cx - half, cx + half
-    y0, y1 = cy - half, cy + half
-    draw.rectangle((x0, y0, x1, y1), outline=fill, width=2)
-    mid_y = cy + size * 0.08
-    draw.line((x0 + 1, y0 + 1, cx, mid_y), fill=fill, width=2)
-    draw.line((x1 - 1, y0 + 1, cx, mid_y), fill=fill, width=2)
+
+def _fit_two_lines(draw, text, fnt, max_width):
+    """主题最多两行：超过时第二行让出省略号空间，标明"后面还有"。
+    此前直接切掉第三行，丢字无声无息——与页2 新闻条目的处理保持一致。"""
+    all_lines = wrap_text(draw, text, fnt, max_width)
+    lines = all_lines[:2]
+    if len(all_lines) > 2 and lines:
+        ell = "…"
+        while lines[1] and draw.textlength(lines[1] + ell, font=fnt) > max_width:
+            lines[1] = lines[1][:-1]
+        lines[1] = (lines[1] + ell) if lines[1] else ell
+    return lines
 
 
 def render_mail_overlay(base, payload, now):
@@ -67,7 +72,7 @@ def render_mail_overlay(base, payload, now):
 
     # 黑标题带：信封图标 + 标题 + 右侧账号/新件数（家族脸）
     draw.rectangle((x0, y0, x1, y0 + BAND_H), fill=0)
-    _draw_envelope(draw, x0 + 21, y0 + BAND_H // 2, 20)
+    draw_tabler(draw, x0 + 22, y0 + BAND_H // 2, 22, "mail", fill=255)
     draw.text((x0 + 42, y0 + BAND_H // 2), "邮件提醒",
               font=noto(20, FONT_STRONG), fill=255, anchor="lm")
     draw.text((x1 - 14, y0 + BAND_H // 2), f"{account} · 新邮件 {total_new} 封",
@@ -80,17 +85,36 @@ def render_mail_overlay(base, payload, now):
     else:
         sender_font = noto(18, FONT_STRONG)
         time_font = noto(16, 500)
+        via_font = noto(16, 400)
         subject_font = noto(18, BODY_TEXT_WEIGHT)
         for index, mail in enumerate(mails[:MAX_SHOWN]):
             top = y0 + BAND_H + index * ENTRY_H
             time_text = mail.get("time") or now.strftime("%H:%M")
             time_w = draw.textlength(time_text, font=time_font)
+            # 时间=邮件到达时间（Date 头转本地时区）：前置小时钟图标示意，
+            # 图标宽度一并计入右侧预留
+            clock_size = 14
+            clock_w = draw.textlength(tabler_glyph("clock"),
+                                      font=tabler_font(clock_size)) + 4
+            # 转发件按来源域名打标（监控端识别 gmail/163/fwd），直收件不占位；
+            # fwd=其他转发源（如企业邮箱的自动转发），统一标"企业邮箱转发"
+            via_text = {"gmail": "Gmail转发", "163": "163转发",
+                        "fwd": "企业邮箱转发"}.get(mail.get("via"), "")
+            via_w = draw.textlength(via_text, font=via_font) + 10 if via_text else 0
             sender = truncate_text(draw, mail.get("from") or "(未知发件人)",
-                                   sender_font, (margin_x1 - time_w - 20) - margin_x0)
+                                   sender_font,
+                                   (margin_x1 - time_w - clock_w - via_w - 20) - margin_x0)
+            asc, desc = sender_font.getmetrics()
+            row_cy = top + 8 + (asc + desc) / 2   # 发件人行视觉中心
             draw.text((margin_x0, top + 8), sender, font=sender_font, fill=0)
-            draw.text((margin_x1, top + 10), time_text, font=time_font, fill=0, anchor="rs")
-            lines = wrap_text(draw, mail.get("subject") or "(无主题)", subject_font,
-                              margin_x1 - margin_x0)[:2]
+            if via_text:
+                draw.text((margin_x1 - time_w - clock_w - 10, row_cy), via_text,
+                          font=via_font, fill=0, anchor="rm")
+            draw_tabler(draw, margin_x1 - time_w - clock_w + clock_size / 2, row_cy,
+                        clock_size, "clock")
+            draw.text((margin_x1, row_cy), time_text, font=time_font, fill=0, anchor="rm")
+            lines = _fit_two_lines(draw, mail.get("subject") or "(无主题)", subject_font,
+                                   margin_x1 - margin_x0)
             if lines:
                 lines[-1] = truncate_text(draw, lines[-1], subject_font,
                                           margin_x1 - margin_x0)
@@ -101,8 +125,13 @@ def render_mail_overlay(base, payload, now):
                 draw.line((margin_x0 - 8, top + ENTRY_H, margin_x1 + 8, top + ENTRY_H),
                           fill=0, width=1)
 
-    # 底部提示：自动收起时间 + 溢出计数
-    footer = "10 分钟后自动收起"
+    # 底部提示：自动收起时间 + 溢出计数。时长取监控下发的 overlay_seconds（配置可改）；
+    # 旧载荷没有该字段时按默认 600 秒显示，不足一分钟按一分钟计
+    try:
+        minutes = max(1, (int(payload.get("overlay_seconds") or 600) + 59) // 60)
+    except (TypeError, ValueError):
+        minutes = 10
+    footer = f"{minutes} 分钟后自动收起"
     if total_new > MAX_SHOWN:
         footer = f"共 {total_new} 封 · " + footer
     draw.text(((x0 + x1) / 2, y1 - FOOTER_H / 2), footer,

@@ -256,30 +256,28 @@ def render_sector_list(draw, bounds, sectors, is_hot=True):
         # 上部右侧：涨跌幅
         draw.text((right - 4, name_y), pct_text, font=pct_font, fill=0, anchor="ra")
 
-        # 下部：领涨/领跌股（支持显示2个股）
-        label_text = "领涨:" if is_hot else "领跌:"
-        draw.text((left, mid + line_gap // 2), label_text, font=label_font, fill=0)
-
-        label_width = draw.textlength(label_text, font=label_font)
-        current_x = left + label_width
-
-        # 支持新的数据结构（包含多个个股）
-        stocks = sector.get("stocks", [])
+        # 下部：领涨/领跌股（支持显示2个股）。先定标签和内容再落笔：没有个股数据时
+        # 冷板块整行不画（见下）
+        stocks = sector.get("stocks") or []
         if stocks:
-            # 显示2个股名称，用空格分隔
-            stock_names = [stock.get("name", "") for stock in stocks[:2]]
-            stock_text = " ".join(filter(None, stock_names))
+            # akshare 路径：热板块带领涨股、冷板块带领跌股（抓取端已按方向排序取前二）
+            label_text = "领涨:" if is_hot else "领跌:"
+            stock_text = " ".join(filter(None, (stock.get("name", "") for stock in stocks[:2]))) or "--"
+        elif is_hot:
+            # 腾讯兜底仅有领涨股(lzg)字段：热板块如实展示领涨
+            label_text = "领涨:"
+            leader_data = sector.get("lzg")
+            stock_text = (leader_data.get("name", "") if isinstance(leader_data, dict) else "") or "--"
+        else:
+            # 冷板块无领跌数据（兜底接口不提供）：个股行整体不显示——跌板块必须展示实际
+            # 领跌，没有就不显示，绝不用领涨股冒充（2026-10-09 用户定稿，横版同款处理；
+            # 竖版此前读的正是领涨股字段却标"领跌:"）
+            label_text = stock_text = ""
 
+        if label_text:
+            draw.text((left, mid + line_gap // 2), label_text, font=label_font, fill=0)
+            label_width = draw.textlength(label_text, font=label_font)
+            current_x = left + label_width
             available_width = right - 4 - current_x
             stock_text = truncate_text(draw, stock_text, leader_font, available_width)
             draw.text((current_x, mid + line_gap // 2), stock_text, font=leader_font, fill=0)
-        else:
-            # 回退到旧的单个股数据结构（腾讯财经API）
-            leader_data = sector.get("lzg", {})
-            if isinstance(leader_data, dict) and leader_data.get("name"):
-                leader_name = leader_data.get("name", "")
-                available_width = right - 4 - current_x
-                leader_text = truncate_text(draw, leader_name, leader_font, available_width)
-                draw.text((current_x, mid + line_gap // 2), leader_text, font=leader_font, fill=0)
-            else:
-                draw.text((current_x, mid + line_gap // 2), "--", font=leader_font, fill=0)

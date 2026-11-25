@@ -15,7 +15,7 @@
 #   .\dashboard_control.ps1 markets                          # 只更新行情并推送
 #   .\dashboard_control.ps1 page4                            # 按领域轮换生成认知洞察(历史去重)并推送
 #   .\dashboard_control.ps1 analysis                         # 强制重新生成AI认知洞察并推送到页4
-#   .\dashboard_control.ps1 page5                            # 渲染页5(智谱AI走势归因)并推送(超TTL且港股时段内自动重生成)
+#   .\dashboard_control.ps1 page5                            # 渲染页5(智谱AI走势归因)并推送(港股时段内每次都重新生成)
 #   .\dashboard_control.ps1 stock                            # 强制重新生成智谱AI走势归因并推送到页5
 #   .\dashboard_control.ps1 mail                             # 新邮件弹窗页(mail_monitor 触发；不写页状态，下轮轮播自然恢复)
 #   .\dashboard_control.ps1 mailoff                          # 邮件弹窗收起：推回底图还原被覆盖页(监控10分钟后自动调)
@@ -29,7 +29,7 @@ param(
 # 运行期文件（缓存/页状态/四灰轮换/日志）都锚定在这里；变体由目录名自动识别
     [string]$DataDir = "",
     [Parameter(Position = 0)]
-    [ValidateSet("test", "weather", "plans", "news", "markets", "analysis", "stock", "refresh", "preview", "status", "clear", "page1", "page2", "page3", "page4", "page5", "mail", "mailoff")]
+    [ValidateSet("test", "weather", "plans", "news", "markets", "analysis", "stock", "refresh", "preview", "status", "clear", "page1", "page2", "page3", "page4", "page5", "mail", "mailoff", "pauselock", "resume")]
     [string]$Command = "refresh",
     [string]$PortName = $env:EPD_SERIAL_PORT,
     [ValidateSet("info", "chess", "white", "black")]
@@ -43,7 +43,8 @@ param(
     # page1-5 切页默认走缓存 TTL（秒出图）；-Force 跳过 TTL 强制联网刷新数据
     [switch]$Force,
     # 等待模式（秒）：锁被轮播刷新占用时排队等待而非立即让位——Web/热键等用户动作用；
-    # 计划任务（VBS→refresh）不带此参数，保持立即让位（20 分钟后自然再来，不值得等）
+    # 计划任务（VBS→refresh -Wait 40）短等 40 秒：邮件弹窗/锁屏还原这类插播只占锁十几秒，
+    # 不值得因此丢掉一整轮刷新；真撞上长时间渲染则到点让位（20 分钟后自然再来）
     [int]$Wait = 0
 )
 
@@ -75,6 +76,8 @@ $LogFile = Join-Path $ScriptDir "control.log"
 # 跨进程互斥：计划任务 / Web 控制台 / 热键 / 手动 CLI 四个入口共用同一把锁，
 # 防止并发渲染互相覆盖 dashboard_data.json 或同时抢占串口
 $MutexName = "Global\EPD_Dashboard_Control"
+# 退出码：0 成功 / 1 失败或让位 / 3 会话锁定（闸门拒绝）/ 4 设备未连接（本轮跳过）。
+# mail_monitor 以 3、4 区分"推迟"与"设备离线"（两种都不丢邮件队列，稍后重试）
 
 # 渲染用 python：优先 EPD_PYTHON 环境变量（需为带 PIL 的解释器），否则退回 PATH 中的 python。
 # 背景：Web 服务实际跑在 uv python（无 PIL）下，子进程若依赖 PATH 解析 python 可能解析到无 PIL 的
@@ -87,6 +90,15 @@ if ($env:EPD_PYTHON) {
 
 $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+# 同一页连续失败多少次后让轮播跳过它。"失败不翻页"的初衷是下一轮重试，但接口持续
+# 故障时会卡死在同一页（2026-11 实测页3/页5 各连续失败 8/10 轮，屏幕一直停在同一画面）。
+# 连败记录与页状态同存 page_state.json（fail_page/fail_count；读取方只认 page，不受影响）
+[int]$FailSkipAfter = 2
+$script:FailPage = 0
+$script:FailCount = 0
+# 渲染进程以 4 退出（cli 的设备在线预检）时置位：最外层按"本轮跳过"收尾，不算失败
+$script:DeviceOffline = $false
 
 function Write-Log([string]$msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -101,20 +113,31 @@ function Write-Log([string]$msg) {
     } catch { }
 }
 
-function Get-PageState {
+function Get-PageStateRaw {
     if (Test-Path -LiteralPath $PageStateFile) {
         try {
-            $state = [System.IO.File]::ReadAllText($PageStateFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
-            if ($state.page -in 1,2,3,4,5) { return [int]$state.page }
+            return ([System.IO.File]::ReadAllText($PageStateFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json)
         } catch { }
     }
+    return $null
+}
+
+function Get-PageState {
+    $state = Get-PageStateRaw
+    if ($state -and $state.page -in 1,2,3,4,5) { return [int]$state.page }
     return 1
+}
+
+function Clear-FailStreak {
+    $script:FailPage = 0
+    $script:FailCount = 0
 }
 
 function Set-PageState {
     param([int]$Page)
-    # 无 BOM 写入，任何读取方（PowerShell/Python）都能直接解析
-    [System.IO.File]::WriteAllText($PageStateFile, "{`"page`": $Page}", $Utf8NoBom)
+    # 无 BOM 写入，任何读取方（PowerShell/Python）都能直接解析；连败记录随页状态一并落盘
+    $json = "{{`"page`": {0}, `"fail_page`": {1}, `"fail_count`": {2}}}" -f $Page, $script:FailPage, $script:FailCount
+    [System.IO.File]::WriteAllText($PageStateFile, $json, $Utf8NoBom)
     return $Page
 }
 
@@ -138,6 +161,12 @@ function Invoke-Render {
     }
     $output | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) {
+        if ($LASTEXITCODE -eq 4) {
+            # cli 在抓数据前做了设备在线预检并以 4 退出：没渲染、没写缓存——不算渲染失败，
+            # 由最外层按"设备未连接，本轮跳过"收尾
+            $script:DeviceOffline = $true
+            throw "设备未连接，已取消渲染（mode=$Mode）"
+        }
         $tail = (@($output | ForEach-Object { $_.ToString() } | Select-Object -Last 12) -join " | ") -replace "\r?\n", " "
         Write-Log "ERROR render mode=$Mode page=$Page exit=$LASTEXITCODE :: $tail"
         throw "渲染失败（mode=$Mode），已取消推送，屏幕保留上次内容"
@@ -196,8 +225,33 @@ function Invoke-RenderAndCommitPage {
     }
 }
 
+# 载入上次运行留下的连败记录（字段损坏则清零，不影响页状态本身）
+try {
+    $savedFail = Get-PageStateRaw
+    if ($savedFail -and $savedFail.fail_page -in 1,2,3,4,5) {
+        $script:FailPage = [int]$savedFail.fail_page
+        $script:FailCount = [int]$savedFail.fail_count
+    }
+} catch { Clear-FailStreak }
+
 $Mutex = New-Object System.Threading.Mutex($false, $MutexName)
 $HasMutex = $false
+
+# ---------- 锁屏暂停（2026-10-20 用户要求）----------
+# 会话锁定（Win+L，LogonUI.exe 运行中）时拒绝一切渲染/推送：屏幕改由锁屏监视线程
+# 推送的"显示已暂停"大弹窗盖住（避免离开工位后新内容/敏感邮件持续展示）。
+# pauselock（锁定时的指定动作）与 resume（解锁还原）豁免闸门；其余命令 exit 3，
+# mail_monitor 据此静默推迟（邮件收信不中断，解锁后补推）。
+function Test-SessionLocked {
+    if ($env:EPD_FORCE_LOCKED) { return $true }   # 自动化测试钩子：不真锁屏
+    return [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue)
+}
+
+if ($Command -notin @("status", "pauselock", "resume") -and (Test-SessionLocked)) {
+    Write-Host "会话已锁定：跳过 $Command（屏幕保持当前状态，解锁后自动恢复）"
+    Write-Log "SKIP $Command : session locked"
+    exit 3
+}
 try {
     if ($Command -ne "status") {
         # 抢不到锁说明另一个实例（多为轮播刷新，一轮约1.5~2.5分钟）正在渲染或推送。
@@ -285,6 +339,17 @@ try {
             Invoke-RenderAndCommitPage "mailoff" -TargetPage 1 -NoCommit
             Write-Log "mailoff(弹窗收起还原底图, transient) -> pushed"
         }
+        "pauselock" {
+            # 锁屏暂停大弹窗：底图(pause_base.png)+显示已暂停覆盖层（监控的锁屏
+            # 监视线程在锁定瞬间触发）；闸门豁免——它就是锁屏时要执行的动作
+            Invoke-RenderAndCommitPage "pause" -TargetPage 1 -NoCommit
+            Write-Log "pauselock(锁屏暂停覆盖层, transient) -> pushed"
+        }
+        "resume" {
+            # 解锁还原：把 pause_base.png 原样推回（锁屏前画面像素级还原）
+            Invoke-RenderAndCommitPage "resume" -TargetPage 1 -NoCommit
+            Write-Log "resume(解锁还原锁屏前画面, transient) -> pushed"
+        }
         "news" {
             # 手动单模块命令语义 = 明确要求联网刷新该模块，不受切页 TTL 限制
             Invoke-RenderAndCommitPage "news" -TargetPage 2 -Force
@@ -298,8 +363,30 @@ try {
         "refresh" {
             # 轮播顺序恢复自然序 1→2→3→4→5（2026-09-30 用户要求；清洗帧已全部取消，
             # 前述"页5 紧跟清洗帧"的顺序调整随之失去意义——试验模式下五页等价）
-            $target = ((Get-PageState) % 5) + 1
-            Invoke-RenderAndCommitPage "full" -TargetPage $target
+            $current = Get-PageState
+            $target = ($current % 5) + 1
+            if ($script:FailPage -eq $target -and $script:FailCount -ge $FailSkipAfter) {
+                # 该页上一轮已连续失败到阈值：本轮跳过它让轮播继续走，下一圈轮到时再试
+                $next = ($target % 5) + 1
+                Write-Host "页$target 已连续失败 $($script:FailCount) 次，本轮跳过，改刷页$next"
+                Write-Log "SKIP page=$target : failed $($script:FailCount) times in a row, carousel moves on to page=$next"
+                $target = $next
+                Clear-FailStreak
+                Set-PageState $current | Out-Null
+            }
+            try {
+                Invoke-RenderAndCommitPage "full" -TargetPage $target
+            } catch {
+                if (-not $script:DeviceOffline) {
+                    # 失败不翻页（下一轮重试同一页），只累加连败记录
+                    if ($script:FailPage -eq $target) { $script:FailCount++ } else { $script:FailPage = $target; $script:FailCount = 1 }
+                    Set-PageState $current | Out-Null
+                    Write-Log "RETRY page=$target : render/push failed ($($script:FailCount)/$FailSkipAfter), same page next cycle"
+                }
+                throw
+            }
+            Clear-FailStreak
+            Set-PageState $target | Out-Null
             Write-Log "refresh(full page=$target) -> pushed"
         }
         "preview" {
@@ -318,6 +405,9 @@ try {
             $curPage = Get-PageState
             $curPageName = switch ($curPage) { 1 { "今日看板" } 2 { "三栏新闻" } 3 { "行情" } 4 { "认知洞察" } 5 { "智谱AI今日走势分析" } default { "页$curPage" } }
             Write-Host ("当前页面: 页{0}（{1}）" -f $curPage, $curPageName)
+            if ($script:FailCount -gt 0) {
+                Write-Host ("连败记录: 页{0} 已连续失败 {1} 次（满 {2} 次后轮播会跳过它一圈）" -f $script:FailPage, $script:FailCount, $FailSkipAfter)
+            }
             # 串口设备在线状态：拔出 USB 后这里会显示离线，插回（哪怕换了 USB 口）推送会自动找回
             $ports = [System.IO.Ports.SerialPort]::GetPortNames()
             if ($ports -contains $PortName) {
@@ -381,6 +471,13 @@ try {
         }
     }
 } catch {
+    if ($script:DeviceOffline) {
+        # 设备未连接：没渲染没推送，按"本轮跳过"收尾——不是渲染失败，不计连败，
+        # 页状态不动；插回后下一轮轮播自动恢复
+        Write-Host "设备未连接：跳过 $Command（插回后下一轮自动恢复）"
+        Write-Log "SKIP $Command : device not connected"
+        exit 4
+    }
     Write-Host ("操作失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
     Write-Log "FAIL $Command : $($_.Exception.Message)"
     exit 1

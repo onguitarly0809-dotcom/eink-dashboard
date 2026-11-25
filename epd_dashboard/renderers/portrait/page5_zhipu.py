@@ -63,7 +63,7 @@ def render_page5(markets, analysis, intraday=None, intraday_ai=None):
     pairs = [("大盘对照", pair_text)]
     notes = (
         "暂无分析报告。",
-        "自动生成：交易日（港股时段至16:05）轮播到本页且报告超过90分钟时自动重新生成。",
+        "自动生成：交易日（港股时段至16:05）每次显示本页都重新生成。",
         "手动生成：运行 dashboard_control.ps1 stock。",
     )
     return render_report_page(
